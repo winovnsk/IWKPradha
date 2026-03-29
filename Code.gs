@@ -256,7 +256,7 @@ function initializeDefaultCategories() {
   if (data.length <= 1) { // Hanya header
     const categories = [
       // Income categories
-      { id: 'CAT-IWK', name: 'Iuran Wajib Kematian', type: 'income', is_active: true },
+      { id: 'CAT-IWK', name: 'Iuran Wajib Keluarga', type: 'income', is_active: true },
       { id: 'CAT-DON', name: 'Donasi', type: 'income', is_active: true },
       { id: 'CAT-HIB', name: 'Hibah', type: 'income', is_active: true },
       // Expense categories
@@ -4291,7 +4291,7 @@ function insertDummyData() {
     const dummyAnnouncements = [
       {
         title: 'Pengumuman Iuran Bulan Ini',
-        content: 'Mohon kepada seluruh warga RT 11 untuk membayar iuran wajib kematian bulan ini paling lambat tanggal 25. Terima kasih atas kerjasamanya.'
+        content: 'Mohon kepada seluruh warga RT 11 untuk membayar iuran wajib keluarga bulan ini paling lambat tanggal 25. Terima kasih atas kerjasamanya.'
       },
       {
         title: 'Jadwal Kerja Bakti',
