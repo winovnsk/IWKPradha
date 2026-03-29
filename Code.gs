@@ -217,23 +217,23 @@ function initializeDriveFolders() {
   try {
     const parentFolder = DriveApp.getFolderById(CONFIG.DRIVE_FOLDER_ID);
     
-    for (const [folderName, folderKey] of Object.entries(CONFIG.FOLDERS)) {
+    for (const [configKey, actualFolderName] of Object.entries(CONFIG.FOLDERS)) {
       try {
         // Cek apakah folder sudah ada
-        const existingFolders = parentFolder.getFoldersByName(folderName);
+        const existingFolders = parentFolder.getFoldersByName(actualFolderName);
         
         if (existingFolders.hasNext()) {
           const folder = existingFolders.next();
-          results.folderIds[folderKey] = folder.getId();
-          results.success.push(`Folder '${folderName}' sudah ada: ${folder.getId()}`);
+          results.folderIds[configKey] = folder.getId();
+          results.success.push(`Folder '${actualFolderName}' sudah ada: ${folder.getId()}`);
         } else {
           // Buat folder baru
-          const newFolder = parentFolder.createFolder(folderName);
-          results.folderIds[folderKey] = newFolder.getId();
-          results.success.push(`Folder '${folderName}' berhasil dibuat: ${newFolder.getId()}`);
+          const newFolder = parentFolder.createFolder(actualFolderName);
+          results.folderIds[configKey] = newFolder.getId();
+          results.success.push(`Folder '${actualFolderName}' berhasil dibuat: ${newFolder.getId()}`);
         }
       } catch (error) {
-        results.errors.push(`Error membuat folder '${folderName}': ${error.message}`);
+        results.errors.push(`Error membuat folder '${actualFolderName}': ${error.message}`);
       }
     }
   } catch (error) {
@@ -777,6 +777,50 @@ function logoutUser(token) {
       success: false,
       message: `Error: ${error.message}`
     };
+  }
+}
+
+/**
+ * Membersihkan session token yang sudah expired dari sheet SETTINGS
+ * Disarankan untuk dijalankan via Time-driven Trigger setiap jam 12 malam
+ */
+function cleanupExpiredSessions() {
+  try {
+    const sheet = getSheet(CONFIG.SHEETS.SETTINGS);
+    const data = sheet.getDataRange().getValues();
+    const rowsToDelete = [];
+    const now = new Date();
+    
+    // Looping dari bawah ke atas agar index tidak bergeser saat menghapus baris
+    for (let i = data.length - 1; i >= 1; i--) {
+      const key = String(data[i][0]);
+      if (key.startsWith('session_')) {
+        try {
+          const sessionData = JSON.parse(data[i][1]);
+          const expiresAt = new Date(sessionData.expires_at);
+          
+          if (expiresAt < now) {
+            rowsToDelete.push(i + 1); // +1 karena sheet index dimulai dari 1
+          }
+        } catch (e) {
+          // Jika JSON korup, hapus saja barisnya
+          rowsToDelete.push(i + 1);
+        }
+      }
+    }
+    
+    // Eksekusi penghapusan
+    rowsToDelete.forEach(rowIndex => {
+      sheet.deleteRow(rowIndex);
+    });
+    
+    return {
+      success: true,
+      message: `Berhasil menghapus ${rowsToDelete.length} sesi kadaluarsa`
+    };
+  } catch (error) {
+    console.error('Error cleanup sessions:', error);
+    return { success: false, message: error.message };
   }
 }
 
@@ -2475,6 +2519,15 @@ function getFilesByRelatedId(relatedId) {
 }
 
 /**
+ * Helper: Extract Drive ID secara aman menggunakan Regex
+ */
+function extractDriveFileId(url) {
+  if (!url) return null;
+  const match = url.match(/[-\w]{25,}/);
+  return match ? match[0] : null;
+}
+
+/**
  * Delete file dari Drive dan sheet
  */
 function deleteFile(fileId, deletedBy) {
@@ -2489,12 +2542,15 @@ function deleteFile(fileId, deletedBy) {
       };
     }
     
-    // Hapus dari Drive
+    // Hapus dari Drive menggunakan ekstraksi ID yang aman
     try {
-      const file = DriveApp.getFileById(fileRecord.file_url.split('/d/')[1]?.split('/')[0]);
-      file.setTrashed(true);
+      const driveId = extractDriveFileId(fileRecord.file_url);
+      if (driveId) {
+        const file = DriveApp.getFileById(driveId);
+        file.setTrashed(true);
+      }
     } catch (e) {
-      // File mungkin sudah tidak ada di Drive
+      console.warn('File mungkin sudah tidak ada di Drive atau izin kurang: ' + e.message);
     }
     
     // Hapus dari sheet
@@ -4239,9 +4295,25 @@ function doGet(e) {
  * Handle POST requests
  */
 function doPost(e) {
-  const data = JSON.parse(e.postData.contents || '{}');
+  let data = {};
+  
+  // Safe parsing untuk mencegah error undefined atau format tidak valid
+  try {
+    if (e && e.postData && e.postData.contents) {
+      data = JSON.parse(e.postData.contents);
+    } else if (e && e.parameter) {
+      // Fallback untuk form-urlencoded
+      data = e.parameter;
+    }
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      message: 'Format JSON tidak valid atau request kosong'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  
   const action = data.action;
-  const token = data.token || e.parameter?.token;
+  const token = data.token || (e && e.parameter ? e.parameter.token : null);
   
   // Verify token for protected endpoints
   let user = null;
