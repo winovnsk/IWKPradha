@@ -4922,3 +4922,1166 @@ function getStatisticsSummary() {
 // ============================================================================
 // END OF CODE
 // ============================================================================
+
+// ============================================================================
+// SECTION 22: EXPORT PDF & EXCEL (LAPORAN KEUANGAN PROFESIONAL)
+// ============================================================================
+
+/**
+ * MASTER EXPORT HANDLER
+ * Dipanggil dari frontend via doGet dengan action=exportReport
+ * Parameter: token, format (pdf/excel/csv), report_type, start_date, end_date, year
+ */
+function exportReport(params, user) {
+  const format      = (params.format || 'pdf').toLowerCase();
+  const reportType  = params.report_type || 'financial';
+  const filters     = {
+    start_date : params.start_date || params.startdate || null,
+    end_date   : params.end_date   || params.enddate   || null,
+    year       : parseInt(params.year) || new Date().getFullYear(),
+    status     : 'approved'
+  };
+
+  // Bangun payload laporan
+  const reportData = buildReportPayload(reportType, filters, user);
+  if (!reportData.success) return reportData;
+
+  switch (format) {
+    case 'pdf':
+      return generatePdfReport(reportData.data, reportType, filters);
+    case 'excel':
+    case 'xlsx':
+      return generateExcelReport(reportData.data, reportType, filters);
+    case 'csv':
+      return generateCsvReport(reportData.data, reportType, filters);
+    default:
+      return { success: false, message: 'Format tidak dikenali. Gunakan: pdf / excel / csv' };
+  }
+}
+
+// ─────────────────────────────────────────────
+// BAGIAN A: BUILDER DATA LAPORAN
+// ─────────────────────────────────────────────
+
+/**
+ * Kumpulkan semua data yang dibutuhkan laporan
+ */
+function buildReportPayload(reportType, filters, user) {
+  try {
+    const settings    = getPublicSettings().data || {};
+    const appName     = settings.app_name   || 'IWK RT 11';
+    const alamatRt    = settings.alamat_rt  || 'Komplek Pradha';
+    const generatedAt = formatDate(new Date(), 'DD-MM-YYYY HH:mm:ss');
+    const generatedBy = user ? user.nama : 'Sistem';
+
+    // Resolusi periode
+    let periodLabel, startDate, endDate;
+    if (filters.start_date && filters.end_date) {
+      startDate   = filters.start_date;
+      endDate     = filters.end_date;
+      periodLabel = `${formatDate(startDate, 'DD-MM-YYYY')} s.d. ${formatDate(endDate, 'DD-MM-YYYY')}`;
+    } else {
+      startDate   = `${filters.year}-01-01`;
+      endDate     = `${filters.year}-12-31`;
+      periodLabel = `Tahun ${filters.year}`;
+    }
+
+    // Transaksi approved di periode ini
+    const allTx = getAllTransactions({
+      start_date : startDate,
+      end_date   : endDate,
+      status     : 'approved'
+    }).data || [];
+
+    const incomeTx  = allTx.filter(t => t.type === 'income');
+    const expenseTx = allTx.filter(t => t.type === 'expense');
+
+    const totalIncome  = incomeTx.reduce( (s, t) => s + (Number(t.nominal) || 0), 0);
+    const totalExpense = expenseTx.reduce((s, t) => s + (Number(t.nominal) || 0), 0);
+    const netBalance   = totalIncome - totalExpense;
+
+    // Saldo awal (closing balance bulan sebelum periode)
+    const startDateObj   = new Date(startDate);
+    const prevMonthDate  = new Date(startDateObj.getFullYear(), startDateObj.getMonth() - 1, 1);
+    const prevBulanKey   = `${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}-${prevMonthDate.getFullYear()}`;
+    const monthlySheet   = getSheet(CONFIG.SHEETS.MONTHLY_BALANCES);
+    const prevBalance    = findRowByValue(monthlySheet, 2, prevBulanKey);
+    const openingBalance = prevBalance ? (Number(prevBalance.closing_balance) || 0)
+                                       : (Number(getSetting('opening_balance')) || 0);
+    const closingBalance = openingBalance + netBalance;
+
+    // Kategori lookup
+    const catMap = {};
+    (getAllCategories().data || []).forEach(c => { catMap[c.id] = c.name; });
+
+    // User lookup (id → nama)
+    const userMap = {};
+    (getAllUsers().data || []).forEach(u => { userMap[u.id] = u.nama || u.id; });
+
+    // Rekap pemasukan per sumber
+    const incomeBySource = {};
+    incomeTx.forEach(t => {
+      const key = t.source || 'Lainnya';
+      incomeBySource[key] = (incomeBySource[key] || 0) + (Number(t.nominal) || 0);
+    });
+
+    // Rekap pengeluaran per kategori
+    const expenseByCategory = {};
+    expenseTx.forEach(t => {
+      const key = catMap[t.category_id] || t.category_id || 'Lainnya';
+      expenseByCategory[key] = (expenseByCategory[key] || 0) + (Number(t.nominal) || 0);
+    });
+
+    // Arus kas bulanan (12 bulan dalam setahun berdasarkan filter.year)
+    const cashFlowMonthly = [];
+    let runningBal = openingBalance;
+    for (let m = 1; m <= 12; m++) {
+      const mStr  = String(m).padStart(2, '0');
+      const mKey  = `${mStr}-${filters.year}`;
+      const mInc  = incomeTx.filter( t => t.tanggal && t.tanggal.startsWith(`${filters.year}-${mStr}`))
+                             .reduce((s, t) => s + (Number(t.nominal) || 0), 0);
+      const mExp  = expenseTx.filter(t => t.tanggal && t.tanggal.startsWith(`${filters.year}-${mStr}`))
+                              .reduce((s, t) => s + (Number(t.nominal) || 0), 0);
+      runningBal += mInc - mExp;
+      cashFlowMonthly.push({
+        bulan        : getMonthName(m),
+        bulan_key    : mKey,
+        pemasukan    : mInc,
+        pengeluaran  : mExp,
+        saldo_akhir  : runningBal
+      });
+    }
+
+    // Data warga & iuran (untuk laporan warga)
+    const iuranPerWarga = {};
+    incomeTx.filter(t => t.source === 'IWK').forEach(t => {
+      const nama = userMap[t.user_id] || t.user_id;
+      if (!iuranPerWarga[nama]) iuranPerWarga[nama] = { total: 0, count: 0, months: [] };
+      iuranPerWarga[nama].total += Number(t.nominal) || 0;
+      iuranPerWarga[nama].count += 1;
+      if (t.bulan_iuran) iuranPerWarga[nama].months.push(t.bulan_iuran);
+    });
+
+    return {
+      success: true,
+      data: {
+        meta: {
+          app_name     : appName,
+          alamat_rt    : alamatRt,
+          report_type  : reportType,
+          period_label : periodLabel,
+          start_date   : startDate,
+          end_date     : endDate,
+          generated_at : generatedAt,
+          generated_by : generatedBy
+        },
+        summary: {
+          opening_balance : openingBalance,
+          total_income    : totalIncome,
+          total_expense   : totalExpense,
+          net_balance     : netBalance,
+          closing_balance : closingBalance
+        },
+        income_by_source    : incomeBySource,
+        expense_by_category : expenseByCategory,
+        cash_flow_monthly   : cashFlowMonthly,
+        iuran_per_warga     : iuranPerWarga,
+        transactions        : allTx.map(t => ({
+          ...t,
+          user_nama    : userMap[t.user_id] || t.user_id,
+          category_nama: catMap[t.category_id] || t.category_id || '-'
+        }))
+      }
+    };
+  } catch (e) {
+    return { success: false, message: `Build payload error: ${e.message}` };
+  }
+}
+
+// ─────────────────────────────────────────────
+// BAGIAN B: GENERATE PDF (via Google Docs)
+// ─────────────────────────────────────────────
+
+/**
+ * Generate laporan PDF profesional menggunakan Google Docs sebagai template
+ * Mengembalikan URL download PDF yang bisa langsung dibuka/diunduh frontend
+ */
+function generatePdfReport(data, reportType, filters) {
+  try {
+    const meta    = data.meta;
+    const summary = data.summary;
+
+    // ── Buat Google Doc baru ──────────────────────────────────────────────
+    const docTitle = `Laporan Keuangan ${meta.app_name} - ${meta.period_label}`;
+    const doc      = DocumentApp.create(docTitle);
+    const body     = doc.getBody();
+
+    // Style konstanta
+    const COLOR_PRIMARY   = '#1a3c5e'; // Navy
+    const COLOR_SECONDARY = '#2e7d32'; // Hijau tua (income)
+    const COLOR_DANGER    = '#c62828'; // Merah (expense)
+    const COLOR_GOLD      = '#f9a825'; // Emas (aksen)
+    const COLOR_LIGHT_BG  = '#e8f5e9';
+    const COLOR_TABLE_HDR = '#1a3c5e';
+    const COLOR_STRIPE    = '#f5f5f5';
+
+    // ── HEADER UTAMA ─────────────────────────────────────────────────────
+    _addDocHeader(body, meta, COLOR_PRIMARY, COLOR_GOLD);
+
+    // ── RINGKASAN NERACA ─────────────────────────────────────────────────
+    _addSectionTitle(body, '1. NERACA SALDO', COLOR_PRIMARY);
+    _addBalanceSummaryTable(body, summary, COLOR_TABLE_HDR, COLOR_SECONDARY, COLOR_DANGER, COLOR_GOLD);
+
+    body.appendParagraph('').setSpacingAfter(4);
+
+    // ── ARUS KAS BULANAN ─────────────────────────────────────────────────
+    _addSectionTitle(body, '2. LAPORAN ARUS KAS BULANAN', COLOR_PRIMARY);
+    _addParagraphNote(body, `Rekapitulasi arus kas masuk dan keluar sepanjang Tahun ${filters.year}.`);
+    _addCashFlowTable(body, data.cash_flow_monthly, summary.opening_balance, COLOR_TABLE_HDR, COLOR_STRIPE);
+
+    body.appendParagraph('').setSpacingAfter(4);
+
+    // ── RINCIAN PEMASUKAN ────────────────────────────────────────────────
+    _addSectionTitle(body, '3. RINCIAN PEMASUKAN', COLOR_PRIMARY);
+    _addParagraphNote(body, 'Pemasukan dikelompokkan berdasarkan sumber dana.');
+    _addSourceBreakdownTable(body, data.income_by_source, summary.total_income, COLOR_TABLE_HDR, COLOR_LIGHT_BG, COLOR_SECONDARY);
+
+    body.appendParagraph('').setSpacingAfter(4);
+
+    // ── RINCIAN PENGELUARAN ──────────────────────────────────────────────
+    _addSectionTitle(body, '4. RINCIAN PENGELUARAN', COLOR_PRIMARY);
+    _addParagraphNote(body, 'Pengeluaran dikelompokkan berdasarkan kategori belanja.');
+    _addExpenseBreakdownTable(body, data.expense_by_category, summary.total_expense, COLOR_TABLE_HDR, COLOR_LIGHT_BG, COLOR_DANGER);
+
+    body.appendParagraph('').setSpacingAfter(4);
+
+    // ── IURAN PER WARGA ──────────────────────────────────────────────────
+    if (Object.keys(data.iuran_per_warga).length > 0) {
+      _addSectionTitle(body, '5. REKAPITULASI IURAN PER WARGA', COLOR_PRIMARY);
+      _addParagraphNote(body, 'Daftar total IWK yang telah diterima per warga pada periode ini.');
+      _addIuranPerWargaTable(body, data.iuran_per_warga, COLOR_TABLE_HDR, COLOR_STRIPE);
+      body.appendParagraph('').setSpacingAfter(4);
+    }
+
+    // ── DETAIL TRANSAKSI ─────────────────────────────────────────────────
+    const sectionNum = Object.keys(data.iuran_per_warga).length > 0 ? '6' : '5';
+    _addSectionTitle(body, `${sectionNum}. DETAIL TRANSAKSI`, COLOR_PRIMARY);
+    _addParagraphNote(body, `Total ${data.transactions.length} transaksi yang telah divalidasi pada periode ini.`);
+    _addTransactionDetailTable(body, data.transactions, COLOR_TABLE_HDR, COLOR_STRIPE, COLOR_SECONDARY, COLOR_DANGER);
+
+    body.appendParagraph('').setSpacingAfter(4);
+
+    // ── TANDA TANGAN & FOOTER ────────────────────────────────────────────
+    _addSignatureSection(body, meta, COLOR_PRIMARY);
+    _addDocFooter(body, meta, COLOR_PRIMARY);
+
+    // ── Simpan & Export ──────────────────────────────────────────────────
+    doc.saveAndClose();
+
+    const docFile     = DriveApp.getFileById(doc.getId());
+    const pdfBlob     = docFile.getAs('application/pdf');
+    const pdfFileName = `Laporan_Keuangan_${meta.app_name.replace(/\s/g, '_')}_${meta.period_label.replace(/\s/g, '_')}.pdf`;
+
+    // Simpan ke folder laporan
+    const folderId = getOrCreateFolder(CONFIG.FOLDERS.REPORTS);
+    const folder   = DriveApp.getFolderById(folderId);
+    const pdfFile  = folder.createFile(pdfBlob.setName(pdfFileName));
+    pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    // Hapus Doc sumber (hanya PDF yang disimpan)
+    docFile.setTrashed(true);
+
+    return {
+      success    : true,
+      message    : 'Laporan PDF berhasil dibuat',
+      data       : {
+        file_url      : `[drive.google.com](https://drive.google.com/uc?export=download&id=${pdfFile.getId()})`,
+        view_url      : `[drive.google.com](https://drive.google.com/file/d/${pdfFile.getId()}/view)`,
+        file_name     : pdfFileName,
+        file_id       : pdfFile.getId(),
+        generated_at  : meta.generated_at
+      }
+    };
+  } catch (e) {
+    return { success: false, message: `Generate PDF error: ${e.message}` };
+  }
+}
+
+// ─── Sub-helper: Header Dokumen ───────────────────────────────────────────────
+function _addDocHeader(body, meta, colorPrimary, colorGold) {
+  // Garis atas dekoratif
+  const topLine = body.appendParagraph('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  topLine.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+         .editAsText().setForegroundColor(colorGold).setFontSize(8);
+
+  // Nama organisasi
+  const org = body.appendParagraph(meta.app_name.toUpperCase());
+  org.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+     .editAsText()
+     .setFontFamily('Arial')
+     .setFontSize(20)
+     .setBold(true)
+     .setForegroundColor(colorPrimary);
+
+  // Alamat
+  const addr = body.appendParagraph(meta.alamat_rt);
+  addr.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+      .editAsText().setFontSize(11).setForegroundColor('#555555').setItalic(true);
+
+  // Judul laporan
+  const title = body.appendParagraph('LAPORAN KEUANGAN');
+  title.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+       .editAsText()
+       .setFontSize(15)
+       .setBold(true)
+       .setForegroundColor(colorPrimary);
+
+  // Periode
+  const period = body.appendParagraph(`Periode: ${meta.period_label}`);
+  period.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+        .editAsText().setFontSize(11).setForegroundColor('#333333');
+
+  // Garis bawah dekoratif
+  const botLine = body.appendParagraph('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  botLine.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+         .editAsText().setForegroundColor(colorGold).setFontSize(8);
+
+  // Meta info (tanggal cetak)
+  const metaInfo = body.appendParagraph(`Dicetak pada: ${meta.generated_at}   |   Oleh: ${meta.generated_by}`);
+  metaInfo.setAlignment(DocumentApp.HorizontalAlignment.RIGHT)
+          .editAsText().setFontSize(8).setForegroundColor('#888888').setItalic(true);
+
+  body.appendParagraph('').setSpacingAfter(6);
+}
+
+// ─── Sub-helper: Judul Section ────────────────────────────────────────────────
+function _addSectionTitle(body, title, color) {
+  const p = body.appendParagraph(title);
+  p.setHeading(DocumentApp.ParagraphHeading.HEADING2)
+   .setSpacingBefore(14)
+   .setSpacingAfter(4);
+  p.editAsText()
+   .setFontFamily('Arial')
+   .setFontSize(12)
+   .setBold(true)
+   .setForegroundColor(color);
+}
+
+// ─── Sub-helper: Paragraf catatan ────────────────────────────────────────────
+function _addParagraphNote(body, text) {
+  const p = body.appendParagraph(text);
+  p.editAsText().setFontSize(9).setForegroundColor('#555555').setItalic(true);
+  p.setSpacingAfter(4);
+}
+
+// ─── Sub-helper: Tabel Neraca Saldo ──────────────────────────────────────────
+function _addBalanceSummaryTable(body, summary, hdrColor, incColor, expColor, goldColor) {
+  const tableData = [
+    ['URAIAN', 'JUMLAH (Rp)'],
+    ['Saldo Awal Periode',    formatRupiah(summary.opening_balance)],
+    ['(+) Total Pemasukan',   formatRupiah(summary.total_income)],
+    ['(-) Total Pengeluaran', formatRupiah(summary.total_expense)],
+    ['(=) Selisih Kas',       formatRupiah(summary.net_balance)],
+    ['SALDO AKHIR PERIODE',   formatRupiah(summary.closing_balance)]
+  ];
+
+  const table = body.appendTable(tableData);
+  table.setBorderWidth(1);
+
+  // Header row
+  const hdr = table.getRow(0);
+  for (let c = 0; c < 2; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
+  }
+  hdr.getCell(0).setWidth(320);
+  hdr.getCell(1).setWidth(160);
+
+  // Baris konten
+  const rowColors = [
+    '#ffffff', incColor, expColor, '#ffffff', goldColor
+  ];
+  const textColors = [
+    '#333333', '#ffffff', '#ffffff', '#333333', '#1a1a1a'
+  ];
+  const isBold = [false, true, true, false, true];
+
+  for (let r = 1; r < tableData.length; r++) {
+    const row = table.getRow(r);
+    const bg  = rowColors[r - 1]  || '#ffffff';
+    const fg  = textColors[r - 1] || '#333333';
+    const bld = isBold[r - 1]     || false;
+
+    for (let c = 0; c < 2; c++) {
+      row.getCell(c).setBackgroundColor(bg)
+         .editAsText().setForegroundColor(fg).setFontSize(10).setBold(bld);
+    }
+    // Rata kanan untuk angka
+    row.getCell(1).setPaddingRight(8)
+       .setVerticalAlignment(DocumentApp.VerticalAlignment.CENTER);
+    const pNum = row.getCell(1).getChild(0).asParagraph();
+    pNum.setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+  }
+}
+
+// ─── Sub-helper: Tabel Arus Kas Bulanan ──────────────────────────────────────
+function _addCashFlowTable(body, cashFlow, openingBalance, hdrColor, stripeColor) {
+  const headers = ['Bulan', 'Saldo Awal (Rp)', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Saldo Akhir (Rp)', 'Net (Rp)'];
+  const rows    = [headers];
+
+  let prevBalance = openingBalance;
+  cashFlow.forEach(row => {
+    const net = row.pemasukan - row.pengeluaran;
+    rows.push([
+      row.bulan,
+      formatRupiah(prevBalance),
+      formatRupiah(row.pemasukan),
+      formatRupiah(row.pengeluaran),
+      formatRupiah(row.saldo_akhir),
+      formatRupiah(net)
+    ]);
+    prevBalance = row.saldo_akhir;
+  });
+
+  // Baris total
+  const totInc  = cashFlow.reduce((s, r) => s + r.pemasukan, 0);
+  const totExp  = cashFlow.reduce((s, r) => s + r.pengeluaran, 0);
+  rows.push(['TOTAL', '-', formatRupiah(totInc), formatRupiah(totExp), '-', formatRupiah(totInc - totExp)]);
+
+  const table = body.appendTable(rows);
+  table.setBorderWidth(1);
+
+  // Header styling
+  const hdr = table.getRow(0);
+  for (let c = 0; c < headers.length; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(9).setBold(true);
+  }
+
+  // Data rows
+  for (let r = 1; r < rows.length - 1; r++) {
+    const bg = r % 2 === 0 ? stripeColor : '#ffffff';
+    const row = table.getRow(r);
+    for (let c = 0; c < headers.length; c++) {
+      row.getCell(c).setBackgroundColor(bg)
+         .editAsText().setFontSize(9).setForegroundColor('#333333');
+    }
+    // Kolom angka rata kanan
+    for (let c = 1; c < headers.length; c++) {
+      row.getCell(c).getChild(0).asParagraph()
+         .setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+    }
+    // Warna net (positif = hijau, negatif = merah)
+    const netVal = cashFlow[r - 1] ? cashFlow[r - 1].pemasukan - cashFlow[r - 1].pengeluaran : 0;
+    row.getCell(5).editAsText()
+       .setForegroundColor(netVal >= 0 ? '#2e7d32' : '#c62828').setBold(netVal !== 0);
+  }
+
+  // Baris TOTAL
+  const totRow = table.getRow(rows.length - 1);
+  for (let c = 0; c < headers.length; c++) {
+    totRow.getCell(c).setBackgroundColor('#1a3c5e')
+          .editAsText().setForegroundColor('#ffffff').setFontSize(9).setBold(true);
+    if (c > 0) totRow.getCell(c).getChild(0).asParagraph()
+                     .setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+  }
+}
+
+// ─── Sub-helper: Tabel Rincian Pemasukan ─────────────────────────────────────
+function _addSourceBreakdownTable(body, incomeBySource, totalIncome, hdrColor, bgColor, accentColor) {
+  const rows = [['Sumber Dana', 'Jumlah (Rp)', 'Persentase (%)']];
+  Object.entries(incomeBySource).sort((a, b) => b[1] - a[1]).forEach(([src, amt]) => {
+    const pct = totalIncome > 0 ? ((amt / totalIncome) * 100).toFixed(1) : '0.0';
+    rows.push([src, formatRupiah(amt), `${pct}%`]);
+  });
+  rows.push(['TOTAL PEMASUKAN', formatRupiah(totalIncome), '100.0%']);
+
+  const table = body.appendTable(rows);
+  table.setBorderWidth(1);
+
+  // Header
+  const hdr = table.getRow(0);
+  for (let c = 0; c < 3; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
+  }
+
+  // Data rows
+  for (let r = 1; r < rows.length - 1; r++) {
+    const row = table.getRow(r);
+    row.getCell(0).setBackgroundColor(bgColor)
+       .editAsText().setFontSize(10).setForegroundColor('#333333');
+    for (let c = 1; c < 3; c++) {
+      row.getCell(c).setBackgroundColor(r % 2 === 0 ? '#f1f8e9' : '#ffffff')
+         .editAsText().setFontSize(10).setForegroundColor(accentColor).setBold(c === 1);
+      row.getCell(c).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+    }
+  }
+
+  // Baris total
+  const totRow = table.getRow(rows.length - 1);
+  for (let c = 0; c < 3; c++) {
+    totRow.getCell(c).setBackgroundColor(accentColor)
+          .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
+    if (c > 0) totRow.getCell(c).getChild(0).asParagraph()
+                     .setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+  }
+}
+
+// ─── Sub-helper: Tabel Rincian Pengeluaran ───────────────────────────────────
+function _addExpenseBreakdownTable(body, expenseByCategory, totalExpense, hdrColor, bgColor, accentColor) {
+  const rows = [['Kategori Belanja', 'Jumlah (Rp)', 'Persentase (%)']];
+  Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1]).forEach(([cat, amt]) => {
+    const pct = totalExpense > 0 ? ((amt / totalExpense) * 100).toFixed(1) : '0.0';
+    rows.push([cat, formatRupiah(amt), `${pct}%`]);
+  });
+  rows.push(['TOTAL PENGELUARAN', formatRupiah(totalExpense), '100.0%']);
+
+  const table = body.appendTable(rows);
+  table.setBorderWidth(1);
+
+  const hdr = table.getRow(0);
+  for (let c = 0; c < 3; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
+  }
+
+  for (let r = 1; r < rows.length - 1; r++) {
+    const row = table.getRow(r);
+    row.getCell(0).setBackgroundColor(bgColor)
+       .editAsText().setFontSize(10).setForegroundColor('#333333');
+    for (let c = 1; c < 3; c++) {
+      row.getCell(c).setBackgroundColor(r % 2 === 0 ? '#ffebee' : '#ffffff')
+         .editAsText().setFontSize(10).setForegroundColor(accentColor).setBold(c === 1);
+      row.getCell(c).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+    }
+  }
+
+  const totRow = table.getRow(rows.length - 1);
+  for (let c = 0; c < 3; c++) {
+    totRow.getCell(c).setBackgroundColor(accentColor)
+          .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
+    if (c > 0) totRow.getCell(c).getChild(0).asParagraph()
+                     .setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+  }
+}
+
+// ─── Sub-helper: Tabel Iuran Per Warga ───────────────────────────────────────
+function _addIuranPerWargaTable(body, iuranPerWarga, hdrColor, stripeColor) {
+  const rows = [['No.', 'Nama Warga', 'Jumlah Bulan', 'Bulan yang Dibayar', 'Total (Rp)']];
+  let no = 1;
+  Object.entries(iuranPerWarga)
+        .sort((a, b) => b[1].total - a[1].total)
+        .forEach(([nama, info]) => {
+    rows.push([
+      String(no++),
+      nama,
+      String(info.count),
+      info.months.slice().sort().join(', ') || '-',
+      formatRupiah(info.total)
+    ]);
+  });
+
+  const table = body.appendTable(rows);
+  table.setBorderWidth(1);
+
+  const hdr = table.getRow(0);
+  for (let c = 0; c < 5; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(9).setBold(true);
+  }
+  hdr.getCell(0).setWidth(30);
+  hdr.getCell(1).setWidth(140);
+  hdr.getCell(2).setWidth(80);
+  hdr.getCell(3).setWidth(180);
+  hdr.getCell(4).setWidth(110);
+
+  for (let r = 1; r < rows.length; r++) {
+    const bg  = r % 2 === 0 ? stripeColor : '#ffffff';
+    const row = table.getRow(r);
+    for (let c = 0; c < 5; c++) {
+      row.getCell(c).setBackgroundColor(bg)
+         .editAsText().setFontSize(9).setForegroundColor('#333333');
+    }
+    row.getCell(0).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    row.getCell(2).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    row.getCell(4).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+    row.getCell(4).editAsText().setForegroundColor('#2e7d32').setBold(true);
+  }
+}
+
+// ─── Sub-helper: Tabel Detail Transaksi ──────────────────────────────────────
+function _addTransactionDetailTable(body, transactions, hdrColor, stripeColor, incColor, expColor) {
+  const rows = [['No.', 'Tanggal', 'Nama Warga', 'Keterangan', 'Kategori', 'Tipe', 'Nominal (Rp)']];
+  transactions.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal))
+              .forEach((t, i) => {
+    const desc = t.bulan_iuran
+      ? `IWK ${t.bulan_iuran}`
+      : (t.deskripsi || t.category_nama || '-');
+    rows.push([
+      String(i + 1),
+      formatDate(t.tanggal, 'DD-MM-YYYY'),
+      t.user_nama || '-',
+      desc,
+      t.category_nama || '-',
+      t.type === 'income' ? 'Masuk' : 'Keluar',
+      formatRupiah(t.nominal)
+    ]);
+  });
+
+  const table = body.appendTable(rows);
+  table.setBorderWidth(1);
+
+  const hdr = table.getRow(0);
+  for (let c = 0; c < 7; c++) {
+    hdr.getCell(c).setBackgroundColor(hdrColor)
+       .editAsText().setForegroundColor('#ffffff').setFontSize(8).setBold(true);
+  }
+
+  for (let r = 1; r < rows.length; r++) {
+    const bg  = r % 2 === 0 ? stripeColor : '#ffffff';
+    const row = table.getRow(r);
+    const isIncome = transactions[r - 1]?.type === 'income';
+
+    for (let c = 0; c < 7; c++) {
+      row.getCell(c).setBackgroundColor(bg)
+         .editAsText().setFontSize(8).setForegroundColor('#333333');
+    }
+    row.getCell(0).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    row.getCell(6).getChild(0).asParagraph().setAlignment(DocumentApp.HorizontalAlignment.RIGHT);
+    row.getCell(6).editAsText()
+       .setForegroundColor(isIncome ? incColor : expColor).setBold(true);
+    row.getCell(5).editAsText()
+       .setForegroundColor(isIncome ? incColor : expColor).setBold(true);
+  }
+}
+
+// ─── Sub-helper: Bagian Tanda Tangan ─────────────────────────────────────────
+function _addSignatureSection(body, meta, colorPrimary) {
+  body.appendParagraph('').setSpacingAfter(8);
+
+  const sep = body.appendParagraph('─────────────────────────────────────────────────────────────────');
+  sep.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+     .editAsText().setForegroundColor('#cccccc').setFontSize(8);
+
+  const sigTitle = body.appendParagraph('PENGESAHAN LAPORAN');
+  sigTitle.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+          .editAsText().setFontSize(11).setBold(true).setForegroundColor(colorPrimary);
+
+  body.appendParagraph('').setSpacingAfter(4);
+
+  // Tabel tanda tangan 2 kolom
+  const sigTable = body.appendTable([
+    ['Bendahara RT', 'Ketua RT'],
+    ['', ''],
+    ['', ''],
+    ['( ________________________ )', '( ________________________ )'],
+  ]);
+  sigTable.setBorderWidth(0);
+
+  [0, 3].forEach(r => {
+    for (let c = 0; c < 2; c++) {
+      sigTable.getRow(r).getCell(c).editAsText()
+              .setFontSize(10).setForegroundColor('#333333').setBold(r === 0);
+      sigTable.getRow(r).getCell(c).getChild(0).asParagraph()
+              .setAlignment(DocumentApp.HorizontalAlignment.CENTER);
+    }
+  });
+  [1, 2].forEach(r => {
+    for (let c = 0; c < 2; c++) {
+      sigTable.getRow(r).getCell(c).editAsText().setFontSize(14);
+    }
+  });
+}
+
+// ─── Sub-helper: Footer Dokumen ───────────────────────────────────────────────
+function _addDocFooter(body, meta, colorPrimary) {
+  body.appendParagraph('').setSpacingAfter(4);
+
+  const line = body.appendParagraph('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  line.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+      .editAsText().setForegroundColor('#f9a825').setFontSize(8);
+
+  const footer = body.appendParagraph(
+    `${meta.app_name}  •  ${meta.alamat_rt}  •  Laporan dicetak: ${meta.generated_at}  •  Sistem IWK & Manajemen Kegiatan`
+  );
+  footer.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+        .editAsText().setFontSize(8).setForegroundColor('#888888').setItalic(true);
+
+  const disclaimer = body.appendParagraph(
+    'Dokumen ini digenerate secara otomatis oleh sistem. Keabsahan dokumen ditentukan oleh tanda tangan pejabat yang berwenang.'
+  );
+  disclaimer.setAlignment(DocumentApp.HorizontalAlignment.CENTER)
+            .editAsText().setFontSize(7).setForegroundColor('#aaaaaa').setItalic(true);
+}
+
+// ─────────────────────────────────────────────
+// BAGIAN C: GENERATE EXCEL (via Google Sheets)
+// ─────────────────────────────────────────────
+
+/**
+ * Generate laporan Excel profesional menggunakan Google Sheets
+ * Mengembalikan URL download .xlsx
+ */
+function generateExcelReport(data, reportType, filters) {
+  try {
+    const meta    = data.meta;
+    const summary = data.summary;
+
+    const ssTitle = `Laporan Keuangan ${meta.app_name} - ${meta.period_label}`;
+    const ss      = SpreadsheetApp.create(ssTitle);
+
+    // ── Sheet 1: Ringkasan ────────────────────────────────────────────────
+    const sheetRingkasan = ss.getSheets()[0];
+    sheetRingkasan.setName('Ringkasan');
+    _buildExcelRingkasan(sheetRingkasan, data);
+
+    // ── Sheet 2: Arus Kas Bulanan ─────────────────────────────────────────
+    const sheetArusKas = ss.insertSheet('Arus Kas Bulanan');
+    _buildExcelArusKas(sheetArusKas, data, summary.opening_balance, filters.year);
+
+    // ── Sheet 3: Detail Transaksi ─────────────────────────────────────────
+    const sheetTx = ss.insertSheet('Detail Transaksi');
+    _buildExcelTransaksi(sheetTx, data.transactions, meta);
+
+    // ── Sheet 4: Iuran Per Warga ──────────────────────────────────────────
+    if (Object.keys(data.iuran_per_warga).length > 0) {
+      const sheetIuran = ss.insertSheet('Iuran Per Warga');
+      _buildExcelIuranWarga(sheetIuran, data.iuran_per_warga, meta);
+    }
+
+    ss.setActiveSheet(sheetRingkasan);
+
+    // Export ke XLSX
+    const ssFile    = DriveApp.getFileById(ss.getId());
+    const xlsxBlob  = ssFile.getAs('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    const xlsxName  = `Laporan_Keuangan_${meta.app_name.replace(/\s/g, '_')}_${meta.period_label.replace(/\s/g, '_')}.xlsx`;
+
+    const folderId  = getOrCreateFolder(CONFIG.FOLDERS.REPORTS);
+    const folder    = DriveApp.getFolderById(folderId);
+    const xlsxFile  = folder.createFile(xlsxBlob.setName(xlsxName));
+    xlsxFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    // Hapus Spreadsheet sumber
+    ssFile.setTrashed(true);
+
+    return {
+      success  : true,
+      message  : 'Laporan Excel berhasil dibuat',
+      data     : {
+        file_url     : `[drive.google.com](https://drive.google.com/uc?export=download&id=${xlsxFile.getId()})`,
+        view_url     : `[drive.google.com](https://drive.google.com/file/d/${xlsxFile.getId()}/view)`,
+        file_name    : xlsxName,
+        file_id      : xlsxFile.getId(),
+        generated_at : meta.generated_at
+      }
+    };
+  } catch (e) {
+    return { success: false, message: `Generate Excel error: ${e.message}` };
+  }
+}
+
+// ─── Excel Sheet: Ringkasan ───────────────────────────────────────────────────
+function _buildExcelRingkasan(sheet, data) {
+  const meta    = data.meta;
+  const summary = data.summary;
+  const navy    = '#1a3c5e';
+  const gold    = '#f9a825';
+  const green   = '#2e7d32';
+  const red     = '#c62828';
+  const white   = '#ffffff';
+
+  // Merge header
+  sheet.getRange('A1:G1').merge().setValue(meta.app_name.toUpperCase())
+       .setBackground(navy).setFontColor(white).setFontSize(16).setFontWeight('bold')
+       .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sheet.setRowHeight(1, 36);
+
+  sheet.getRange('A2:G2').merge().setValue(`Laporan Keuangan — Periode: ${meta.period_label}`)
+       .setBackground(navy).setFontColor(gold).setFontSize(11).setFontWeight('bold')
+       .setHorizontalAlignment('center');
+
+  sheet.getRange('A3:G3').merge().setValue(meta.alamat_rt)
+       .setBackground('#1e4976').setFontColor('#ccddee').setFontSize(9).setFontStyle('italic')
+       .setHorizontalAlignment('center');
+
+  sheet.getRange('A4:G4').merge()
+       .setValue(`Dicetak: ${meta.generated_at}  |  Oleh: ${meta.generated_by}`)
+       .setBackground('#f5f5f5').setFontColor('#888888').setFontSize(8).setFontStyle('italic')
+       .setHorizontalAlignment('right');
+
+  // ── Neraca Saldo ──────────────────────────────────────────────────────
+  sheet.getRange('A6:C6').merge().setValue('NERACA SALDO')
+       .setBackground(navy).setFontColor(white).setFontSize(11).setFontWeight('bold')
+       .setHorizontalAlignment('center');
+
+  const neracaRows = [
+    ['Uraian', 'Jumlah (Rp)'],
+    ['Saldo Awal Periode',    summary.opening_balance],
+    ['(+) Total Pemasukan',   summary.total_income],
+    ['(-) Total Pengeluaran', summary.total_expense],
+    ['(=) Selisih Kas',       summary.net_balance],
+    ['SALDO AKHIR PERIODE',   summary.closing_balance]
+  ];
+  const neracaColors = [navy, '#37474f', green, red, '#f9a825', navy];
+  const neracaFg     = [white, white, white, white, '#1a1a1a', white];
+
+  neracaRows.forEach((row, i) => {
+    const r = 7 + i;
+    sheet.getRange(r, 1).setValue(row[0]).setFontWeight(i === 0 || i === 5 ? 'bold' : 'normal')
+         .setBackground(neracaColors[i]).setFontColor(neracaFg[i]).setFontSize(10);
+    if (i === 0) {
+      sheet.getRange(r, 2).setValue(row[1]).setBackground(neracaColors[i])
+           .setFontColor(neracaFg[i]).setFontWeight('bold').setFontSize(10)
+           .setHorizontalAlignment('center');
+    } else {
+      sheet.getRange(r, 2).setValue(row[1]).setNumberFormat('"Rp"#,##0')
+           .setBackground(neracaColors[i]).setFontColor(neracaFg[i])
+           .setFontWeight(i === 5 ? 'bold' : 'normal')
+           .setHorizontalAlignment('right').setFontSize(10);
+    }
+  });
+
+  // ── Rekap Pemasukan ───────────────────────────────────────────────────
+  let startRow = 15;
+  sheet.getRange(startRow, 4, 1, 3).merge().setValue('REKAP PEMASUKAN')
+       .setBackground(green).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  startRow++;
+
+  sheet.getRange(startRow, 4).setValue('Sumber').setBackground(navy).setFontColor(white).setFontWeight('bold');
+  sheet.getRange(startRow, 5).setValue('Jumlah (Rp)').setBackground(navy).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.getRange(startRow, 6).setValue('%').setBackground(navy).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  startRow++;
+
+  const totalIncome = summary.total_income;
+  Object.entries(data.income_by_source).sort((a, b) => b[1] - a[1]).forEach(([src, amt], idx) => {
+    const bg = idx % 2 === 0 ? '#f1f8e9' : white;
+    const pct = totalIncome > 0 ? amt / totalIncome : 0;
+    sheet.getRange(startRow, 4).setValue(src).setBackground(bg);
+    sheet.getRange(startRow, 5).setValue(amt).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontColor(green).setFontWeight('bold').setHorizontalAlignment('right');
+    sheet.getRange(startRow, 6).setValue(pct).setNumberFormat('0.0%').setBackground(bg)
+         .setHorizontalAlignment('center');
+    startRow++;
+  });
+  sheet.getRange(startRow, 4).setValue('TOTAL').setBackground(green).setFontColor(white).setFontWeight('bold');
+  sheet.getRange(startRow, 5).setValue(totalIncome).setNumberFormat('"Rp"#,##0')
+       .setBackground(green).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('right');
+  sheet.getRange(startRow, 6).setValue(1).setNumberFormat('0.0%')
+       .setBackground(green).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+
+  // ── Rekap Pengeluaran ─────────────────────────────────────────────────
+  startRow += 2;
+  sheet.getRange(startRow, 4, 1, 3).merge().setValue('REKAP PENGELUARAN')
+       .setBackground(red).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  startRow++;
+
+  sheet.getRange(startRow, 4).setValue('Kategori').setBackground(navy).setFontColor(white).setFontWeight('bold');
+  sheet.getRange(startRow, 5).setValue('Jumlah (Rp)').setBackground(navy).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.getRange(startRow, 6).setValue('%').setBackground(navy).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+  startRow++;
+
+  const totalExpense = summary.total_expense;
+  Object.entries(data.expense_by_category).sort((a, b) => b[1] - a[1]).forEach(([cat, amt], idx) => {
+    const bg = idx % 2 === 0 ? '#ffebee' : white;
+    const pct = totalExpense > 0 ? amt / totalExpense : 0;
+    sheet.getRange(startRow, 4).setValue(cat).setBackground(bg);
+    sheet.getRange(startRow, 5).setValue(amt).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontColor(red).setFontWeight('bold').setHorizontalAlignment('right');
+    sheet.getRange(startRow, 6).setValue(pct).setNumberFormat('0.0%').setBackground(bg)
+         .setHorizontalAlignment('center');
+    startRow++;
+  });
+  sheet.getRange(startRow, 4).setValue('TOTAL').setBackground(red).setFontColor(white).setFontWeight('bold');
+  sheet.getRange(startRow, 5).setValue(totalExpense).setNumberFormat('"Rp"#,##0')
+       .setBackground(red).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('right');
+  sheet.getRange(startRow, 6).setValue(1).setNumberFormat('0.0%')
+       .setBackground(red).setFontColor(white).setFontWeight('bold').setHorizontalAlignment('center');
+
+  // Auto resize
+  sheet.setColumnWidth(1, 220);
+  sheet.setColumnWidth(2, 160);
+  sheet.setColumnWidth(3, 20);
+  sheet.setColumnWidth(4, 160);
+  sheet.setColumnWidth(5, 160);
+  sheet.setColumnWidth(6, 80);
+  sheet.setColumnWidth(7, 80);
+}
+
+// ─── Excel Sheet: Arus Kas Bulanan ───────────────────────────────────────────
+function _buildExcelArusKas(sheet, data, openingBalance, year) {
+  const navy  = '#1a3c5e';
+  const white = '#ffffff';
+  const green = '#2e7d32';
+  const red   = '#c62828';
+  const meta  = data.meta;
+
+  // Header
+  sheet.getRange('A1:G1').merge()
+       .setValue(`LAPORAN ARUS KAS BULANAN — ${meta.app_name} — Tahun ${year}`)
+       .setBackground(navy).setFontColor(white).setFontSize(13).setFontWeight('bold')
+       .setHorizontalAlignment('center');
+  sheet.setRowHeight(1, 32);
+
+  // Kolom header
+  const headers = ['Bulan', 'Saldo Awal (Rp)', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Net (Rp)', 'Saldo Akhir (Rp)', 'Ket.'];
+  headers.forEach((h, i) => {
+    sheet.getRange(2, i + 1).setValue(h)
+         .setBackground(navy).setFontColor(white).setFontWeight('bold')
+         .setHorizontalAlignment('center').setFontSize(9);
+  });
+  sheet.setRowHeight(2, 24);
+
+  let prevBal = openingBalance;
+  data.cash_flow_monthly.forEach((row, i) => {
+    const r   = i + 3;
+    const net = row.pemasukan - row.pengeluaran;
+    const bg  = i % 2 === 0 ? '#f5f9ff' : white;
+
+    sheet.getRange(r, 1).setValue(row.bulan).setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 2).setValue(prevBal).setNumberFormat('"Rp"#,##0').setBackground(bg).setHorizontalAlignment('right').setFontSize(9);
+    sheet.getRange(r, 3).setValue(row.pemasukan).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontColor(green).setFontWeight('bold').setHorizontalAlignment('right').setFontSize(9);
+    sheet.getRange(r, 4).setValue(row.pengeluaran).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontColor(red).setFontWeight('bold').setHorizontalAlignment('right').setFontSize(9);
+    sheet.getRange(r, 5).setValue(net).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontColor(net >= 0 ? green : red).setFontWeight('bold').setHorizontalAlignment('right').setFontSize(9);
+    sheet.getRange(r, 6).setValue(row.saldo_akhir).setNumberFormat('"Rp"#,##0').setBackground(bg)
+         .setFontWeight('bold').setHorizontalAlignment('right').setFontSize(9);
+    sheet.getRange(r, 7).setValue(net >= 0 ? '▲ Surplus' : '▼ Defisit')
+         .setFontColor(net >= 0 ? green : red).setBackground(bg).setFontSize(9);
+
+    prevBal = row.saldo_akhir;
+  });
+
+  // Baris total
+  const totRow = 3 + data.cash_flow_monthly.length;
+  const totInc = data.cash_flow_monthly.reduce((s, r) => s + r.pemasukan, 0);
+  const totExp = data.cash_flow_monthly.reduce((s, r) => s + r.pengeluaran, 0);
+  ['TOTAL', '-', totInc, totExp, totInc - totExp, '-', '-'].forEach((v, c) => {
+    const cell = sheet.getRange(totRow, c + 1);
+    cell.setValue(v).setBackground(navy).setFontColor(white).setFontWeight('bold').setFontSize(9);
+    if (c > 1 && c < 5 && typeof v === 'number') cell.setNumberFormat('"Rp"#,##0').setHorizontalAlignment('right');
+  });
+
+  [1, 2, 3, 4, 5, 6].forEach(c => sheet.setColumnWidth(c, 130));
+  sheet.setColumnWidth(7, 90);
+}
+
+// ─── Excel Sheet: Detail Transaksi ───────────────────────────────────────────
+function _buildExcelTransaksi(sheet, transactions, meta) {
+  const navy  = '#1a3c5e';
+  const white = '#ffffff';
+  const green = '#2e7d32';
+  const red   = '#c62828';
+
+  sheet.getRange('A1:H1').merge()
+       .setValue(`DETAIL TRANSAKSI — ${meta.app_name} — ${meta.period_label}`)
+       .setBackground(navy).setFontColor(white).setFontSize(12).setFontWeight('bold')
+       .setHorizontalAlignment('center');
+  sheet.setRowHeight(1, 30);
+
+  const headers = ['No.', 'Tanggal', 'Nama Warga', 'Keterangan', 'Kategori', 'Metode', 'Tipe', 'Nominal (Rp)'];
+  headers.forEach((h, i) => {
+    sheet.getRange(2, i + 1).setValue(h)
+         .setBackground(navy).setFontColor(white).setFontWeight('bold')
+         .setHorizontalAlignment('center').setFontSize(9);
+  });
+
+  transactions.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal))
+              .forEach((t, i) => {
+    const r        = i + 3;
+    const isIncome = t.type === 'income';
+    const bg       = i % 2 === 0 ? '#f9f9f9' : white;
+    const desc     = t.bulan_iuran ? `IWK ${t.bulan_iuran}` : (t.deskripsi || '-');
+
+    sheet.getRange(r, 1).setValue(i + 1).setBackground(bg).setHorizontalAlignment('center').setFontSize(9);
+    sheet.getRange(r, 2).setValue(formatDate(t.tanggal, 'DD-MM-YYYY')).setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 3).setValue(t.user_nama || '-').setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 4).setValue(desc).setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 5).setValue(t.category_nama || '-').setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 6).setValue(t.metode_pembayaran || '-').setBackground(bg).setFontSize(9)
+         .setHorizontalAlignment('center');
+    sheet.getRange(r, 7).setValue(isIncome ? 'Masuk' : 'Keluar')
+         .setFontColor(isIncome ? green : red).setFontWeight('bold').setBackground(bg)
+         .setHorizontalAlignment('center').setFontSize(9);
+    sheet.getRange(r, 8).setValue(Number(t.nominal) || 0)
+         .setNumberFormat('"Rp"#,##0')
+         .setFontColor(isIncome ? green : red).setFontWeight('bold')
+         .setBackground(bg).setHorizontalAlignment('right').setFontSize(9);
+  });
+
+  [30, 90, 140, 180, 100, 90, 70, 130].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+  sheet.setFrozenRows(2);
+}
+
+// ─── Excel Sheet: Iuran Per Warga ────────────────────────────────────────────
+function _buildExcelIuranWarga(sheet, iuranPerWarga, meta) {
+  const navy  = '#1a3c5e';
+  const white = '#ffffff';
+  const green = '#2e7d32';
+
+  sheet.getRange('A1:E1').merge()
+       .setValue(`REKAPITULASI IURAN PER WARGA — ${meta.app_name} — ${meta.period_label}`)
+       .setBackground(navy).setFontColor(white).setFontSize(12).setFontWeight('bold')
+       .setHorizontalAlignment('center');
+
+  ['No.', 'Nama Warga', 'Jumlah Bulan', 'Bulan yang Dibayar', 'Total (Rp)'].forEach((h, i) => {
+    sheet.getRange(2, i + 1).setValue(h)
+         .setBackground(navy).setFontColor(white).setFontWeight('bold')
+         .setHorizontalAlignment('center').setFontSize(9);
+  });
+
+  Object.entries(iuranPerWarga)
+        .sort((a, b) => b[1].total - a[1].total)
+        .forEach(([nama, info], i) => {
+    const r  = i + 3;
+    const bg = i % 2 === 0 ? '#f1f8e9' : white;
+    sheet.getRange(r, 1).setValue(i + 1).setBackground(bg).setHorizontalAlignment('center').setFontSize(9);
+    sheet.getRange(r, 2).setValue(nama).setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 3).setValue(info.count).setBackground(bg).setHorizontalAlignment('center').setFontSize(9);
+    sheet.getRange(r, 4).setValue(info.months.slice().sort().join(', ') || '-').setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 5).setValue(info.total).setNumberFormat('"Rp"#,##0')
+         .setFontColor(green).setFontWeight('bold').setBackground(bg)
+         .setHorizontalAlignment('right').setFontSize(9);
+  });
+
+  [30, 160, 80, 220, 130].forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+  sheet.setFrozenRows(2);
+}
+
+// ─────────────────────────────────────────────
+// BAGIAN D: GENERATE CSV (Lightweight)
+// ─────────────────────────────────────────────
+
+function generateCsvReport(data, reportType, filters) {
+  try {
+    const meta    = data.meta;
+    const summary = data.summary;
+    const esc     = v => {
+      const s = String(v === null || v === undefined ? '' : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const row = cols => cols.map(esc).join(',');
+
+    const lines = [];
+
+    // Header info
+    lines.push(row([meta.app_name, '', '', '', '', '', '']));
+    lines.push(row([`Laporan Keuangan — Periode: ${meta.period_label}`, '', '', '', '', '', '']));
+    lines.push(row([`Dicetak: ${meta.generated_at}`, '', '', '', '', '', '']));
+    lines.push('');
+
+    // Neraca
+    lines.push(row(['=== NERACA SALDO ===', '']));
+    lines.push(row(['Uraian', 'Jumlah (Rp)']));
+    lines.push(row(['Saldo Awal Periode',    summary.opening_balance]));
+    lines.push(row(['Total Pemasukan',       summary.total_income]));
+    lines.push(row(['Total Pengeluaran',     summary.total_expense]));
+    lines.push(row(['Selisih Kas',           summary.net_balance]));
+    lines.push(row(['Saldo Akhir Periode',   summary.closing_balance]));
+    lines.push('');
+
+    // Arus kas
+    lines.push(row(['=== ARUS KAS BULANAN ===', '', '', '', '']));
+    lines.push(row(['Bulan', 'Pemasukan (Rp)', 'Pengeluaran (Rp)', 'Net (Rp)', 'Saldo Akhir (Rp)']));
+    data.cash_flow_monthly.forEach(r => {
+      lines.push(row([r.bulan, r.pemasukan, r.pengeluaran, r.pemasukan - r.pengeluaran, r.saldo_akhir]));
+    });
+    lines.push('');
+
+    // Detail transaksi
+    lines.push(row(['=== DETAIL TRANSAKSI ===', '', '', '', '', '', '']));
+    lines.push(row(['Tanggal', 'Nama Warga', 'Keterangan', 'Kategori', 'Metode', 'Tipe', 'Nominal (Rp)']));
+    data.transactions.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal)).forEach(t => {
+      lines.push(row([
+        formatDate(t.tanggal, 'DD-MM-YYYY'),
+        t.user_nama || '-',
+        t.bulan_iuran ? `IWK ${t.bulan_iuran}` : (t.deskripsi || '-'),
+        t.category_nama || '-',
+        t.metode_pembayaran || '-',
+        t.type === 'income' ? 'Masuk' : 'Keluar',
+        t.nominal
+      ]));
+    });
+
+    const csvContent = lines.join('\n');
+    const csvName    = `Laporan_${meta.app_name.replace(/\s/g, '_')}_${meta.period_label.replace(/\s/g, '_')}.csv`;
+
+    return {
+      success  : true,
+      message  : 'Laporan CSV berhasil dibuat',
+      data     : {
+        content      : csvContent,
+        file_name    : csvName,
+        generated_at : meta.generated_at
+      }
+    };
+  } catch (e) {
+    return { success: false, message: `Generate CSV error: ${e.message}` };
+  }
+}
+
+// ─────────────────────────────────────────────
+// BAGIAN E: INTEGRASI doGet / doPost
+// ─────────────────────────────────────────────
+
+/**
+ * Tambahkan case ini ke dalam switch di doGet() yang sudah ada:
+ *
+ *   case 'exportReport':
+ *     if (!user) {
+ *       result = { success: false, message: 'Autentikasi diperlukan' };
+ *       break;
+ *     }
+ *     result = exportReport(e.parameter, user);
+ *     break;
+ *
+ * Tambahkan case ini ke dalam switch di doPost() yang sudah ada:
+ *
+ *   case 'exportReport':
+ *     if (!auth.authenticated) return ContentService.createTextOutput(
+ *       JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+ *     result = exportReport(data, user);
+ *     break;
+ */
+
+// ─────────────────────────────────────────────
+// BAGIAN F: CONTOH PEMANGGILAN DARI FRONTEND
+// ─────────────────────────────────────────────
+
+/**
+ * Contoh fetch dari JavaScript frontend:
+ *
+ * // Export PDF tahunan
+ * fetch(`${SCRIPT_URL}?action=exportReport&token=${token}&format=pdf&year=2025`)
+ *   .then(r => r.json())
+ *   .then(res => {
+ *     if (res.success) window.open(res.data.file_url, '_blank');
+ *   });
+ *
+ * // Export Excel dengan rentang tanggal
+ * fetch(`${SCRIPT_URL}?action=exportReport&token=${token}&format=excel&start_date=2025-01-01&end_date=2025-06-30`)
+ *   .then(r => r.json())
+ *   .then(res => {
+ *     if (res.success) {
+ *       const a = document.createElement('a');
+ *       a.href = res.data.file_url;
+ *       a.download = res.data.file_name;
+ *       a.click();
+ *     }
+ *   });
+ *
+ * // Export CSV (langsung tampil di browser / unduh)
+ * fetch(`${SCRIPT_URL}?action=exportReport&token=${token}&format=csv&year=2025`)
+ *   .then(r => r.json())
+ *   .then(res => {
+ *     if (res.success) {
+ *       const blob = new Blob([res.data.content], { type: 'text/csv;charset=utf-8;' });
+ *       const url  = URL.createObjectURL(blob);
+ *       const a    = document.createElement('a');
+ *       a.href = url; a.download = res.data.file_name; a.click();
+ *     }
+ *   });
+ */
+
