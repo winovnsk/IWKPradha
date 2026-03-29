@@ -412,8 +412,13 @@ function formatDate(date, format = 'DD-MM-YYYY') {
 /**
  * Hash password menggunakan SHA-256
  */
+function getPasswordSalt() {
+  const scriptProps = PropertiesService.getScriptProperties();
+  return scriptProps.getProperty('PASSWORD_SALT') || CONFIG.PASSWORD_SALT;
+}
+
 function hashPassword(password) {
-  const salted = password + CONFIG.PASSWORD_SALT;
+  const salted = password + getPasswordSalt();
   const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salted);
   return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
@@ -704,6 +709,9 @@ function loginUser(identifier, password) {
       sheet.getRange(userRowIndex, lastLoginColumn).setValue(getCurrentDateTime());
     }
     
+    // Single-session policy: invalidasi sesi lama sebelum membuat token baru
+    invalidateUserSessions(user.id);
+
     // Generate session token
     const sessionToken = generateSessionToken(user.id);
     
@@ -751,32 +759,47 @@ function generateSessionToken(userId) {
   return token;
 }
 
+function invalidateUserSessions(userId) {
+  const sheet = getSheet(CONFIG.SHEETS.SETTINGS);
+  const data = sheet.getDataRange().getValues();
+  const rowsToDelete = [];
+
+  for (let i = data.length - 1; i >= 1; i--) {
+    const key = String(data[i][0] || '');
+    if (!key.startsWith('session_')) continue;
+
+    const sessionData = safeJsonParse(data[i][1]);
+    if (sessionData && String(sessionData.user_id) === String(userId)) {
+      rowsToDelete.push(i + 1);
+    }
+  }
+
+  rowsToDelete.sort((a, b) => b - a);
+  rowsToDelete.forEach(rowIndex => sheet.deleteRow(rowIndex));
+}
+
 /**
  * Verifikasi session token
  */
 function verifySessionToken(token) {
   try {
     if (!token) return null;
-    
+
     const sessionData = getSetting(`session_${token}`);
     if (!sessionData) return null;
-    
+
     const session = safeJsonParse(sessionData);
-    if (!session) return null;
-    
-    // Cek expiry
-    if (new Date(session.expires_at) < new Date()) {
-      // Session expired, hapus
-      deleteSessionToken(token);
+    if (!session || !session.expires_at || !session.user_id) return null;
+
+    // Cek expiry lebih awal dan langsung invalidasi
+    if (new Date(session.expires_at) <= new Date()) {
+      deleteSessionToken(token); // best-effort cleanup
       return null;
     }
-    
-    // Get user data
+
     const user = getUserById(session.user_id);
-    if (!user || user.status !== 'approved') {
-      return null;
-    }
-    
+    if (!user || user.status !== 'approved') return null;
+
     return user;
   } catch (error) {
     return null;
@@ -842,7 +865,8 @@ function cleanupExpiredSessions() {
       }
     }
     
-    // Eksekusi penghapusan
+    // Eksekusi penghapusan (descending untuk mencegah pergeseran indeks)
+    rowsToDelete.sort((a, b) => b - a);
     rowsToDelete.forEach(rowIndex => {
       sheet.deleteRow(rowIndex);
     });
@@ -1041,7 +1065,8 @@ function getAllUsers(filters = {}) {
     let users = sheetToArray(data);
 
     // Secara default, sembunyikan user yang sudah di-soft delete
-    if (!filters.include_deleted) {
+    const includeDeleted = filters.include_deleted || filters.includedeleted;
+    if (!includeDeleted) {
       users = users.filter(u => u.status !== 'deleted');
     }
     
@@ -1454,6 +1479,33 @@ function getAllTransactions(filters = {}) {
 /**
  * Update transaction
  */
+function validateTransactionDataForUpdate(data) {
+  if (data.type !== undefined && !CONFIG.ENUMS.TRANSACTION_TYPE.includes(data.type)) {
+    return { valid: false, message: 'Tipe transaksi tidak valid (income/expense)' };
+  }
+
+  if (data.nominal !== undefined && formatNominal(data.nominal) <= 0) {
+    return { valid: false, message: 'Nominal harus lebih dari 0' };
+  }
+
+  if (data.tanggal !== undefined) {
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(data.tanggal)) {
+      return { valid: false, message: 'Format tanggal harus YYYY-MM-DD' };
+    }
+  }
+
+  if (data.status !== undefined && !CONFIG.ENUMS.TRANSACTION_STATUS.includes(data.status)) {
+    return { valid: false, message: 'Status tidak valid' };
+  }
+
+  if (data.metode_pembayaran !== undefined && !CONFIG.ENUMS.PAYMENT_METHOD.includes(data.metode_pembayaran)) {
+    return { valid: false, message: 'Metode pembayaran tidak valid' };
+  }
+
+  return { valid: true };
+}
+
 function updateTransaction(transactionId, transactionData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.TRANSACTIONS);
@@ -1467,7 +1519,7 @@ function updateTransaction(transactionId, transactionData, updatedBy) {
     }
     
     // Validasi input
-    const validation = validateTransactionData(transactionData);
+    const validation = validateTransactionDataForUpdate(transactionData);
     if (!validation.valid) {
       return {
         success: false,
@@ -2786,8 +2838,9 @@ function updateMonthlyBalance(targetDate) {
     const targetYear = dateObj.getFullYear();
     
     const now = new Date();
-    // FIX BUG: Jika transaksi adalah masa depan, gunakan targetDate sebagai batas akhir looping, bukan 'now'
-    const maxDate = dateObj > now ? dateObj : now;
+    const maxFutureMonths = 24; // Batasi kalkulasi maksimal 2 tahun ke depan
+    const absoluteMax = new Date(now.getFullYear(), now.getMonth() + maxFutureMonths, 1);
+    const maxDate = dateObj > now ? (dateObj > absoluteMax ? absoluteMax : dateObj) : now;
     const endMonth = maxDate.getMonth() + 1;
     const endYear = maxDate.getFullYear();
 
@@ -3319,21 +3372,42 @@ function savePaymentDraft(userId, step, dataJson) {
 function getPaymentDraft(userId) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
-    const draft = findRowByValue(sheet, 2, userId);
-    
-    if (!draft || draft.status !== 'draft') {
+    const data = sheet.getDataRange().getValues();
+
+    if (data.length <= 1) {
+      return { success: false, message: 'Tidak ada draft yang tersimpan' };
+    }
+
+    const headers = data[0];
+    let latestDraft = null;
+
+    // Cari dari bawah agar mendapatkan draft terbaru
+    for (let i = data.length - 1; i >= 1; i--) {
+      const row = data[i];
+      const rowUserId = String(row[1]);
+      const rowStatus = String(row[4]);
+
+      if (rowUserId === String(userId) && rowStatus === 'draft') {
+        latestDraft = {};
+        headers.forEach((header, index) => {
+          latestDraft[header] = row[index];
+        });
+        break;
+      }
+    }
+
+    if (!latestDraft) {
       return {
         success: false,
         message: 'Tidak ada draft yang tersimpan'
       };
     }
-    
-    // Parse data_json
-    draft.data_json = safeJsonParse(draft.data_json, {});
-    
+
+    latestDraft.data_json = safeJsonParse(latestDraft.data_json, {});
+
     return {
       success: true,
-      data: draft
+      data: latestDraft
     };
   } catch (error) {
     return {
@@ -4194,7 +4268,7 @@ function clearDummyData() {
  * Handle GET requests
  */
 function doGet(e) {
-  const action = e.parameter.action;
+  const endpoint = e.parameter.action;
   const token = e.parameter.token;
   
   // Verify token for protected endpoints
@@ -4206,7 +4280,7 @@ function doGet(e) {
   let result;
   
   try {
-    switch (action) {
+    switch (endpoint) {
       // Public endpoints
       case 'getPublicSettings':
         result = getPublicSettings();
@@ -4238,12 +4312,14 @@ function doGet(e) {
           result = { success: false, message: 'Autentikasi diperlukan' };
           break;
         }
+        const requestedUserId = cleanString(e.parameter.user_id || e.parameter.userid || '');
+        const filterUserId = user.role !== 'admin' ? user.id : (requestedUserId || undefined);
         result = getAllTransactions({
           type: e.parameter.type,
           status: e.parameter.status,
-          start_date: e.parameter.start_date,
-          end_date: e.parameter.end_date,
-          user_id: user.role !== 'admin' ? user.id : cleanString(e.parameter.user_id || '')
+          start_date: e.parameter.start_date || e.parameter.startdate,
+          end_date: e.parameter.end_date || e.parameter.enddate,
+          user_id: filterUserId
         });
         break;
         
@@ -4274,7 +4350,8 @@ function doGet(e) {
         result = getAllUsers({
           status: e.parameter.status,
           role: e.parameter.role,
-          search: e.parameter.search
+          search: e.parameter.search,
+          include_deleted: e.parameter.include_deleted === 'true' || e.parameter.includedeleted === 'true'
         });
         break;
         
@@ -4293,7 +4370,7 @@ function doGet(e) {
         }
         result = getLogs({
           user_id: e.parameter.user_id,
-          action: e.parameter.action,
+          action: e.parameter.log_action || e.parameter.logaction || '',
           limit: parseInt(e.parameter.limit) || 100
         });
         break;
@@ -4599,14 +4676,13 @@ function getUnpaidMonths(userId) {
     const transactions = getAllTransactions({
       user_id: userId,
       type: 'income',
-      source: 'IWK',
-      status: 'approved'
+      source: 'IWK'
     });
-    
-    const paidMonths = new Set();
+
+    const paidMonths = new Map();
     (transactions.data || []).forEach(t => {
-      if (t.bulan_iuran) {
-        paidMonths.add(t.bulan_iuran);
+      if (t.bulan_iuran && (t.status === 'approved' || t.status === 'pending')) {
+        paidMonths.set(t.bulan_iuran, t.status);
       }
     });
     
@@ -4746,9 +4822,15 @@ function exportToCSV(type, filters = {}) {
         
       case 'users':
         const userResult = getAllUsers(filters);
-        headers = ['ID', 'Nama', 'Alamat', 'No HP', 'Email', 'Status'];
+        headers = ['ID', 'Nama', 'Alamat', 'No HP', 'Email', 'Status', 'Role'];
         rows = (userResult.data || []).map(item => [
-          item.id, item.nama, item.alamat, item.no_hp, item.email || '', item.status
+          item.id,
+          item.nama || '',
+          item.alamat || '',
+          item.no_hp || '',
+          item.email || '',
+          item.status || '',
+          item.role || ''
         ]);
         break;
         
