@@ -785,7 +785,8 @@ function verifySessionToken(token) {
   try {
     if (!token) return null;
 
-    const sessionData = getSetting(`session_${token}`);
+    const sessionKey = `session_${token}`;
+    const sessionData = getSetting(sessionKey);
     if (!sessionData) return null;
 
     const session = safeJsonParse(sessionData);
@@ -799,6 +800,15 @@ function verifySessionToken(token) {
 
     const user = getUserById(session.user_id);
     if (!user || user.status !== 'approved') return null;
+
+    // Sliding session expiry: perpanjang saat sisa masa berlaku sudah < 50%
+    const timeoutMs = CONFIG.SESSION_TIMEOUT_HOURS * 60 * 60 * 1000;
+    const remainingMs = new Date(session.expires_at).getTime() - Date.now();
+    if (remainingMs > 0 && remainingMs < timeoutMs / 2) {
+      const newExpiry = new Date(Date.now() + timeoutMs).toISOString();
+      session.expires_at = newExpiry;
+      setSetting(sessionKey, JSON.stringify(session), 'Session token');
+    }
 
     return user;
   } catch (error) {
@@ -2838,11 +2848,8 @@ function updateMonthlyBalance(targetDate) {
     const targetYear = dateObj.getFullYear();
     
     const now = new Date();
-    const maxFutureMonths = 24; // Batasi kalkulasi maksimal 2 tahun ke depan
-    const absoluteMax = new Date(now.getFullYear(), now.getMonth() + maxFutureMonths, 1);
-    const maxDate = dateObj > now ? (dateObj > absoluteMax ? absoluteMax : dateObj) : now;
-    const endMonth = maxDate.getMonth() + 1;
-    const endYear = maxDate.getFullYear();
+    const endMonth = now.getMonth() + 1;
+    const endYear = now.getFullYear();
 
     const allTx = getAllTransactions({ status: 'approved' }).data || [];
     const txByMonth = {};
@@ -3348,9 +3355,8 @@ function savePaymentDraft(userId, step, dataJson) {
         'draft',
         now
       ];
-      
-      const lastRow = sheet.getLastRow();
-      sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+
+      insertRowWithLock(sheet, rowData);
       
       return {
         success: true,
@@ -3660,7 +3666,7 @@ function testTransactionCRUD() {
       source: 'IWK',
       nominal: 100000,
       tanggal: formatDate(new Date(), 'YYYY-MM-DD'),
-      bulan_iuran: formatDate(new Date(), 'DD-MM-YYYY'),
+      bulan_iuran: formatDate(new Date(), 'MM-YYYY'),
       metode_pembayaran: 'transfer',
       status: 'pending'
     }, 'TEST-USER');
@@ -4376,11 +4382,7 @@ function doGet(e) {
         break;
 
       case 'exportReport':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
-        result = exportReport(e.parameter, user);
+        result = { success: false, message: 'Gunakan POST untuk exportReport agar token tidak dikirim via URL' };
         break;
         
       default:
