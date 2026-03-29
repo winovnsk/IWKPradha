@@ -4374,6 +4374,14 @@ function doGet(e) {
           limit: parseInt(e.parameter.limit) || 100
         });
         break;
+
+      case 'exportReport':
+        if (!user) {
+          result = { success: false, message: 'Autentikasi diperlukan' };
+          break;
+        }
+        result = exportReport(e.parameter, user);
+        break;
         
       default:
         result = {
@@ -4390,7 +4398,8 @@ function doGet(e) {
             'getUsers',
             'getCategories',
             'getBankAccounts',
-            'getLogs'
+            'getLogs',
+            'exportReport'
           ]
         };
     }
@@ -4593,6 +4602,13 @@ function doPost(e) {
         if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = uploadFile(data.base64, data.file_name, data.folder_type, data.related_id, user.id);
         break;
+
+      case 'exportReport':
+        if (!auth.authenticated) return ContentService
+          .createTextOutput(JSON.stringify(auth))
+          .setMimeType(ContentService.MimeType.JSON);
+        result = exportReport(data, user);
+        break;
         
       // Testing endpoints (untuk development)
       case 'runTests':
@@ -4628,7 +4644,7 @@ function doPost(e) {
             'createBankAccount', 'updateBankAccount', 'deleteBankAccount',
             'createEvent', 'updateEvent', 'deleteEvent',
             'createAnnouncement', 'updateAnnouncement', 'deleteAnnouncement',
-            'updateSetting', 'uploadFile',
+            'updateSetting', 'uploadFile', 'exportReport',
             'runTests', 'insertDummyData', 'initializeSheets', 'initializeDrive'
           ]
         };
@@ -4979,7 +4995,7 @@ function buildReportPayload(reportType, filters, user) {
     if (filters.start_date && filters.end_date) {
       startDate   = filters.start_date;
       endDate     = filters.end_date;
-      periodLabel = `${formatDate(startDate, 'DD-MM-YYYY')} s.d. ${formatDate(endDate, 'DD-MM-YYYY')}`;
+      periodLabel = `${formatDate(new Date(startDate), 'DD-MM-YYYY')} s.d. ${formatDate(new Date(endDate), 'DD-MM-YYYY')}`;
     } else {
       startDate   = `${filters.year}-01-01`;
       endDate     = `${filters.year}-12-31`;
@@ -5195,11 +5211,11 @@ function generatePdfReport(data, reportType, filters) {
       success    : true,
       message    : 'Laporan PDF berhasil dibuat',
       data       : {
-        file_url      : `[drive.google.com](https://drive.google.com/uc?export=download&id=${pdfFile.getId()})`,
-        view_url      : `[drive.google.com](https://drive.google.com/file/d/${pdfFile.getId()}/view)`,
-        file_name     : pdfFileName,
-        file_id       : pdfFile.getId(),
-        generated_at  : meta.generated_at
+        file_url     : `https://drive.google.com/uc?export=download&id=${pdfFile.getId()}`,
+        view_url     : `https://drive.google.com/file/d/${pdfFile.getId()}/view`,
+        file_name    : pdfFileName,
+        file_id      : pdfFile.getId(),
+        generated_at : meta.generated_at
       }
     };
   } catch (e) {
@@ -5294,9 +5310,6 @@ function _addBalanceSummaryTable(body, summary, hdrColor, incColor, expColor, go
     hdr.getCell(c).setBackgroundColor(hdrColor)
        .editAsText().setForegroundColor('#ffffff').setFontSize(10).setBold(true);
   }
-  hdr.getCell(0).setWidth(320);
-  hdr.getCell(1).setWidth(160);
-
   // Baris konten
   const rowColors = [
     '#ffffff', incColor, expColor, '#ffffff', goldColor
@@ -5520,7 +5533,7 @@ function _addTransactionDetailTable(body, transactions, hdrColor, stripeColor, i
       : (t.deskripsi || t.category_nama || '-');
     rows.push([
       String(i + 1),
-      formatDate(t.tanggal, 'DD-MM-YYYY'),
+      formatDate(new Date(t.tanggal), 'DD-MM-YYYY'),
       t.user_nama || '-',
       desc,
       t.category_nama || '-',
@@ -5669,8 +5682,8 @@ function generateExcelReport(data, reportType, filters) {
       success  : true,
       message  : 'Laporan Excel berhasil dibuat',
       data     : {
-        file_url     : `[drive.google.com](https://drive.google.com/uc?export=download&id=${xlsxFile.getId()})`,
-        view_url     : `[drive.google.com](https://drive.google.com/file/d/${xlsxFile.getId()}/view)`,
+        file_url     : `https://drive.google.com/uc?export=download&id=${xlsxFile.getId()}`,
+        view_url     : `https://drive.google.com/file/d/${xlsxFile.getId()}/view`,
         file_name    : xlsxName,
         file_id      : xlsxFile.getId(),
         generated_at : meta.generated_at
@@ -5896,7 +5909,7 @@ function _buildExcelTransaksi(sheet, transactions, meta) {
     const desc     = t.bulan_iuran ? `IWK ${t.bulan_iuran}` : (t.deskripsi || '-');
 
     sheet.getRange(r, 1).setValue(i + 1).setBackground(bg).setHorizontalAlignment('center').setFontSize(9);
-    sheet.getRange(r, 2).setValue(formatDate(t.tanggal, 'DD-MM-YYYY')).setBackground(bg).setFontSize(9);
+    sheet.getRange(r, 2).setValue(formatDate(new Date(t.tanggal), 'DD-MM-YYYY')).setBackground(bg).setFontSize(9);
     sheet.getRange(r, 3).setValue(t.user_nama || '-').setBackground(bg).setFontSize(9);
     sheet.getRange(r, 4).setValue(desc).setBackground(bg).setFontSize(9);
     sheet.getRange(r, 5).setValue(t.category_nama || '-').setBackground(bg).setFontSize(9);
@@ -5995,7 +6008,7 @@ function generateCsvReport(data, reportType, filters) {
     lines.push(row(['Tanggal', 'Nama Warga', 'Keterangan', 'Kategori', 'Metode', 'Tipe', 'Nominal (Rp)']));
     data.transactions.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal)).forEach(t => {
       lines.push(row([
-        formatDate(t.tanggal, 'DD-MM-YYYY'),
+        formatDate(new Date(t.tanggal), 'DD-MM-YYYY'),
         t.user_nama || '-',
         t.bulan_iuran ? `IWK ${t.bulan_iuran}` : (t.deskripsi || '-'),
         t.category_nama || '-',
@@ -6008,12 +6021,21 @@ function generateCsvReport(data, reportType, filters) {
     const csvContent = lines.join('\n');
     const csvName    = `Laporan_${meta.app_name.replace(/\s/g, '_')}_${meta.period_label.replace(/\s/g, '_')}.csv`;
 
+    const folderId = getOrCreateFolder(CONFIG.FOLDERS.REPORTS);
+    const folder   = DriveApp.getFolderById(folderId);
+    const csvBlob  = Utilities.newBlob(csvContent, 'text/csv', csvName);
+    const csvFile  = folder.createFile(csvBlob);
+    csvFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
     return {
       success  : true,
       message  : 'Laporan CSV berhasil dibuat',
       data     : {
         content      : csvContent,
+        file_url     : `https://drive.google.com/uc?export=download&id=${csvFile.getId()}`,
+        view_url     : `https://drive.google.com/file/d/${csvFile.getId()}/view`,
         file_name    : csvName,
+        file_id      : csvFile.getId(),
         generated_at : meta.generated_at
       }
     };
@@ -6027,23 +6049,7 @@ function generateCsvReport(data, reportType, filters) {
 // ─────────────────────────────────────────────
 
 /**
- * Tambahkan case ini ke dalam switch di doGet() yang sudah ada:
- *
- *   case 'exportReport':
- *     if (!user) {
- *       result = { success: false, message: 'Autentikasi diperlukan' };
- *       break;
- *     }
- *     result = exportReport(e.parameter, user);
- *     break;
- *
- * Tambahkan case ini ke dalam switch di doPost() yang sudah ada:
- *
- *   case 'exportReport':
- *     if (!auth.authenticated) return ContentService.createTextOutput(
- *       JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
- *     result = exportReport(data, user);
- *     break;
+ * Endpoint exportReport telah diintegrasikan ke doGet() dan doPost().
  */
 
 // ─────────────────────────────────────────────
@@ -6084,4 +6090,3 @@ function generateCsvReport(data, reportType, filters) {
  *     }
  *   });
  */
-
