@@ -55,6 +55,9 @@ const CONFIG = {
     REPORTS: 'reports',
     PROFILES: 'profiles'
   },
+
+  // Salt untuk hash password
+  PASSWORD_SALT: 'IWK_RT11_SecureSalt_2026', // Jangan ubah setelah rilis
   
   // Prefix ID untuk setiap entitas
   ID_PREFIX: {
@@ -396,16 +399,13 @@ function formatDate(date, format = 'DD-MM-YYYY') {
   const hours = String(d.getHours()).padStart(2, '0');
   const minutes = String(d.getMinutes()).padStart(2, '0');
   const seconds = String(d.getSeconds()).padStart(2, '0');
-  
+
   switch (format) {
-    case 'DD-MM-YYYY':
-      return `${day}-${month}-${year}`;
-    case 'DD-MM-YYYY HH:mm:ss':
-      return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
-    case 'YYYY-MM-DD':
-      return `${year}-${month}-${day}`;
-    default:
-      return `${day}-${month}-${year}`;
+    case 'DD-MM-YYYY': return `${day}-${month}-${year}`;
+    case 'MM-YYYY': return `${month}-${year}`; // Format konsisten untuk iuran
+    case 'DD-MM-YYYY HH:mm:ss': return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
+    case 'YYYY-MM-DD': return `${year}-${month}-${day}`;
+    default: return `${day}-${month}-${year}`;
   }
 }
 
@@ -413,7 +413,8 @@ function formatDate(date, format = 'DD-MM-YYYY') {
  * Hash password menggunakan SHA-256
  */
 function hashPassword(password) {
-  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, password);
+  const salted = password + CONFIG.PASSWORD_SALT;
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salted);
   return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
 
@@ -457,11 +458,13 @@ function sheetToArray(sheetData) {
  * Find row index by column value
  */
 function findRowIndex(sheet, columnIndex, searchValue) {
-  const data = sheet.getDataRange().getValues();
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][columnIndex - 1] === searchValue) {
-      return i + 1; // Return 1-based index
-    }
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  // Optimasi: Hanya baca 1 kolom yang dicari, bukan seluruh data sheet
+  const columnData = sheet.getRange(2, columnIndex, lastRow - 1, 1).getValues();
+  const searchStr = String(searchValue).toLowerCase();
+  for (let i = 0; i < columnData.length; i++) {
+    if (String(columnData[i][0]).toLowerCase() === searchStr) return i + 2;
   }
   return -1;
 }
@@ -470,19 +473,35 @@ function findRowIndex(sheet, columnIndex, searchValue) {
  * Find row data by column value
  */
 function findRowByValue(sheet, columnIndex, searchValue) {
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][columnIndex - 1] === searchValue) {
-      const obj = {};
-      headers.forEach((header, index) => {
-        obj[header] = data[i][index];
-      });
-      return obj;
-    }
+  const rowIndex = findRowIndex(sheet, columnIndex, searchValue);
+  if (rowIndex > 0) {
+    const lastCol = sheet.getLastColumn();
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    const rowData = sheet.getRange(rowIndex, 1, 1, lastCol).getValues()[0];
+    const obj = {};
+    headers.forEach((header, index) => { obj[header] = rowData[index]; });
+    return obj;
   }
   return null;
+}
+
+// FUNGSI BARU: Mencegah Race Condition
+function insertRowWithLock(sheet, rowData) {
+  const lock = LockService.getScriptLock();
+  if (lock.tryLock(10000)) { // Tunggu maks 10 detik
+    try {
+      const lastRow = sheet.getLastRow();
+      sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+      SpreadsheetApp.flush(); // Paksa tulis langsung
+      return true;
+    } catch (e) {
+      throw new Error('Gagal simpan data: ' + e.message);
+    } finally {
+      lock.releaseLock();
+    }
+  } else {
+    throw new Error('Sistem sedang sibuk. Silakan coba beberapa saat lagi.');
+  }
 }
 
 /**
@@ -932,8 +951,7 @@ function registerUser(userData) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Log aktivitas
     logActivity(userId, 'REGISTER', 'users', userId, { nama: userData.nama });
@@ -1298,8 +1316,7 @@ function createTransaction(transactionData, createdBy) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Update monthly balance
     updateMonthlyBalance(transactionData.tanggal || formatDate(new Date(), 'YYYY-MM-DD'));
@@ -1624,8 +1641,7 @@ function createCategory(categoryData, createdBy) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Log aktivitas
     logActivity(createdBy, 'CREATE_CATEGORY', 'categories', categoryId, categoryData);
@@ -1793,8 +1809,7 @@ function createBankAccount(accountData, createdBy) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Log aktivitas
     logActivity(createdBy, 'CREATE_BANK_ACCOUNT', 'bank_accounts', accountId, accountData);
@@ -1971,8 +1986,7 @@ function createEvent(eventData, createdBy) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Log aktivitas
     logActivity(createdBy, 'CREATE_EVENT', 'events', eventId, eventData);
@@ -2173,8 +2187,7 @@ function createAnnouncement(announcementData, createdBy) {
     ];
     
     // Insert ke sheet
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+    insertRowWithLock(sheet, rowData);
     
     // Log aktivitas
     logActivity(createdBy, 'CREATE_ANNOUNCEMENT', 'announcements', announcementId, announcementData);
@@ -2492,8 +2505,7 @@ function saveFileRecord(fileData) {
     now
   ];
   
-  const lastRow = sheet.getLastRow();
-  sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+  insertRowWithLock(sheet, rowData);
   
   return fileId;
 }
@@ -2744,74 +2756,60 @@ function getMonthlyBalanceReport(year) {
 /**
  * Update monthly balance (called after transaction changes)
  */
-function updateMonthlyBalance(date) {
+function updateMonthlyBalance(targetDate) {
   try {
-    const dateObj = new Date(date);
-    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const year = dateObj.getFullYear();
-    const bulanKey = `${month}-${year}`;
-    
-    // Get all transactions for this month
-    const startDate = `${year}-${month}-01`;
-    const lastDay = new Date(year, dateObj.getMonth() + 1, 0).getDate();
-    const endDate = `${year}-${month}-${lastDay}`;
-    
-    const transactions = getAllTransactions({
-      start_date: startDate,
-      end_date: endDate,
-      status: 'approved'
-    });
-    
-    const txData = transactions.data || [];
-    
-    const totalIncome = txData
-      .filter(t => t.type === 'income')
-      .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-    
-    const totalExpense = txData
-      .filter(t => t.type === 'expense')
-      .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-    
-    // Get opening balance from previous month
-    let openingBalance = 0;
-    const prevMonth = dateObj.getMonth() === 0 ? 12 : dateObj.getMonth();
-    const prevYear = dateObj.getMonth() === 0 ? year - 1 : year;
-    const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
-    
     const sheet = getSheet(CONFIG.SHEETS.MONTHLY_BALANCES);
-    const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
-    
-    if (prevBalance) {
-      openingBalance = Number(prevBalance.closing_balance) || 0;
-    } else {
-      // Use setting opening_balance if no previous balance
-      openingBalance = Number(getSetting('opening_balance')) || 0;
+    const dateObj = new Date(targetDate);
+    const targetMonth = dateObj.getMonth() + 1;
+    const targetYear = dateObj.getFullYear();
+
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+
+    // Loop dari bulan target sampai bulan saat ini
+    let calcYear = targetYear;
+    let calcMonth = targetMonth;
+
+    while (calcYear < currentYear || (calcYear === currentYear && calcMonth <= currentMonth)) {
+      const monthStr = String(calcMonth).padStart(2, '0');
+      const bulanKey = `${monthStr}-${calcYear}`;
+
+      const startDate = `${calcYear}-${monthStr}-01`;
+      const lastDay = new Date(calcYear, calcMonth, 0).getDate();
+      const endDate = `${calcYear}-${monthStr}-${lastDay}`;
+
+      const txData = getAllTransactions({ start_date: startDate, end_date: endDate, status: 'approved' }).data || [];
+      const totalIncome = txData.filter(t => t.type === 'income').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
+      const totalExpense = txData.filter(t => t.type === 'expense').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
+
+      let openingBalance = 0;
+      const prevMonth = calcMonth === 1 ? 12 : calcMonth - 1;
+      const prevYear = calcMonth === 1 ? calcYear - 1 : calcYear;
+      const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
+
+      const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
+      if (prevBalance) {
+        openingBalance = Number(prevBalance.closing_balance) || 0;
+      } else {
+        openingBalance = Number(getSetting('opening_balance')) || 0;
+      }
+
+      const closingBalance = openingBalance + totalIncome - totalExpense;
+      const existingRow = findRowIndex(sheet, 2, bulanKey);
+      const timestamp = getCurrentDateTime();
+
+      if (existingRow > 0) {
+        sheet.getRange(existingRow, 3, 1, 5).setValues([[openingBalance, totalIncome, totalExpense, closingBalance, timestamp]]);
+      } else {
+        insertRowWithLock(sheet, [generateId('BAL'), bulanKey, openingBalance, totalIncome, totalExpense, closingBalance, timestamp]);
+      }
+
+      // Maju ke bulan berikutnya
+      calcMonth++;
+      if (calcMonth > 12) { calcMonth = 1; calcYear++; }
     }
-    
-    const closingBalance = openingBalance + totalIncome - totalExpense;
-    
-    // Update or insert
-    const existingRow = findRowIndex(sheet, 2, bulanKey);
-    const now = getCurrentDateTime();
-    
-    if (existingRow > 0) {
-      // Update existing
-      sheet.getRange(existingRow, 3).setValue(openingBalance);
-      sheet.getRange(existingRow, 4).setValue(totalIncome);
-      sheet.getRange(existingRow, 5).setValue(totalExpense);
-      sheet.getRange(existingRow, 6).setValue(closingBalance);
-      sheet.getRange(existingRow, 7).setValue(now);
-    } else {
-      // Insert new
-      const balanceId = generateId('BAL');
-      const rowData = [
-        balanceId, bulanKey, openingBalance, totalIncome, totalExpense, closingBalance, now
-      ];
-      
-      const lastRow = sheet.getLastRow();
-      sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
-    }
-    
+
     return true;
   } catch (error) {
     console.error('Error updating monthly balance:', error);
@@ -4296,31 +4294,29 @@ function doGet(e) {
  */
 function doPost(e) {
   let data = {};
-  
-  // Safe parsing untuk mencegah error undefined atau format tidak valid
   try {
     if (e && e.postData && e.postData.contents) {
       data = JSON.parse(e.postData.contents);
     } else if (e && e.parameter) {
-      // Fallback untuk form-urlencoded
       data = e.parameter;
+      // FIX TIPE DATA: Ubah string 'true'/'false' jadi boolean beneran
+      for (let key in data) {
+        if (data[key] === 'true') data[key] = true;
+        if (data[key] === 'false') data[key] = false;
+      }
     }
   } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({
-      success: false,
-      message: 'Format JSON tidak valid atau request kosong'
-    })).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: 'Format JSON tidak valid' })).setMimeType(ContentService.MimeType.JSON);
   }
-  
+
   const action = data.action;
   const token = data.token || (e && e.parameter ? e.parameter.token : null);
-  
-  // Verify token for protected endpoints
-  let user = null;
-  if (token) {
-    user = verifySessionToken(token);
-  }
-  
+
+  // IMPLEMENTASI MIDDLEWARE:
+  const auth = requireAuth({ token: token });
+  const user = auth.authenticated ? auth.user : null;
+  const adminCheck = requireAdmin(user);
+
   let result;
   
   try {
@@ -4340,210 +4336,135 @@ function doPost(e) {
         
       // User management
       case 'updateUser':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = updateUser(data.user_id || user.id, data, user.id);
         break;
         
       case 'approveUser':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = approveUser(data.user_id, user.id);
         break;
         
       case 'rejectUser':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = rejectUser(data.user_id, user.id, data.reason);
         break;
         
       case 'deleteUser':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteUser(data.user_id, user.id);
         break;
         
       // Transaction management
       case 'createTransaction':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = createTransaction(data, user.id);
         break;
         
       case 'updateTransaction':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = updateTransaction(data.transaction_id, data, user.id);
         break;
         
       case 'validateTransaction':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = validateTransaction(data.transaction_id, data.status, user.id, data.notes);
         break;
         
       case 'deleteTransaction':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteTransaction(data.transaction_id, user.id);
         break;
         
       // Payment submission
       case 'savePaymentDraft':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = savePaymentDraft(user.id, data.step, data.data);
         break;
         
       case 'getPaymentDraft':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = getPaymentDraft(user.id);
         break;
         
       case 'submitPayment':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = submitPayment(user.id, data);
         break;
         
       // Category management (admin)
       case 'createCategory':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = createCategory(data, user.id);
         break;
         
       case 'updateCategory':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateCategory(data.category_id, data, user.id);
         break;
         
       case 'deleteCategory':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteCategory(data.category_id, user.id);
         break;
         
       // Bank account management (admin)
       case 'createBankAccount':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = createBankAccount(data, user.id);
         break;
         
       case 'updateBankAccount':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateBankAccount(data.account_id, data, user.id);
         break;
         
       case 'deleteBankAccount':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteBankAccount(data.account_id, user.id);
         break;
         
       // Event management (admin)
       case 'createEvent':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = createEvent(data, user.id);
         break;
         
       case 'updateEvent':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateEvent(data.event_id, data, user.id);
         break;
         
       case 'deleteEvent':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteEvent(data.event_id, user.id);
         break;
         
       // Announcement management (admin)
       case 'createAnnouncement':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = createAnnouncement(data, user.id);
         break;
         
       case 'updateAnnouncement':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateAnnouncement(data.announcement_id, data, user.id);
         break;
         
       case 'deleteAnnouncement':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteAnnouncement(data.announcement_id, user.id);
         break;
         
       // Settings management (admin)
       case 'updateSetting':
-        if (!user || user.role !== 'admin') {
-          result = { success: false, message: 'Akses ditolak' };
-          break;
-        }
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateSetting(data.key, data.value, data.description, user.id);
         break;
         
       // File upload
       case 'uploadFile':
-        if (!user) {
-          result = { success: false, message: 'Autentikasi diperlukan' };
-          break;
-        }
+        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
         result = uploadFile(data.base64, data.file_name, data.folder_type, data.related_id, user.id);
         break;
         
@@ -4640,7 +4561,7 @@ function getUnpaidMonths(userId) {
     const unpaid = [];
     for (let i = 0; i < 12; i++) {
       const date = new Date(currentYear, currentMonth - 1 - i, 1);
-      const monthStr = formatDate(date, 'DD-MM-YYYY');
+      const monthStr = formatDate(date, 'MM-YYYY'); // FIX format string
       
       if (!paidMonths.has(monthStr)) {
         unpaid.push({
