@@ -2914,9 +2914,12 @@ function updateMonthlyBalance(targetDate) {
     let calcYear = targetYear;
     let calcMonth = targetMonth;
     let openingBalance = null;
+    let iterCount = 0;
+    const MAX_ITER = 120; // Batas maksimum 10 tahun untuk mencegah loop terlalu panjang
     
     // Looping berhenti pada bulan dan tahun maksimal (sekarang, atau masa depan)
-    while (calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) {
+    while ((calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) && iterCount < MAX_ITER) {
+      iterCount++;
       const monthStr = String(calcMonth).padStart(2, '0');
       const bulanKey = `${monthStr}-${calcYear}`;
       
@@ -3496,10 +3499,15 @@ function submitPayment(userId, paymentData) {
     }
     
     // Update draft status
-    const sheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
-    const rowIndex = findRowIndex(sheet, 2, userId);
-    if (rowIndex > 0) {
-      sheet.getRange(rowIndex, 5).setValue('submitted');
+    const psSheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
+    const psData = psSheet.getDataRange().getValues();
+    for (let i = psData.length - 1; i >= 1; i--) {
+      const rowUserId = String(psData[i][1]);
+      const rowStatus = String(psData[i][4]);
+      if (rowUserId === String(userId) && rowStatus === 'draft') {
+        psSheet.getRange(i + 1, 5).setValue('submitted');
+        break;
+      }
     }
     
     // Generate WhatsApp URL
@@ -4321,8 +4329,8 @@ function clearDummyData() {
  * Handle GET requests
  */
 function doGet(e) {
-  const endpoint = e.parameter.action;
-  const token = e.parameter.token;
+  const endpoint = e && e.parameter ? (e.parameter.action || '') : '';
+  const token = e && e.parameter ? e.parameter.token : null;
   
   // Verify token for protected endpoints
   let user = null;
@@ -4428,6 +4436,31 @@ function doGet(e) {
         });
         break;
 
+      case 'getProfile':
+        if (!user) {
+          result = { success: false, message: 'Autentikasi diperlukan' };
+          break;
+        }
+        const profileId = user.role === 'admin'
+          ? cleanString(e.parameter.userid || e.parameter.user_id || user.id)
+          : user.id;
+        result = {
+          success: true,
+          data: getUserById(profileId)
+        };
+        break;
+
+      case 'getUnpaidMonths':
+        if (!user) {
+          result = { success: false, message: 'Autentikasi diperlukan' };
+          break;
+        }
+        const unpaidUserId = user.role === 'admin'
+          ? cleanString(e.parameter.userid || e.parameter.user_id || user.id)
+          : user.id;
+        result = getUnpaidMonths(unpaidUserId);
+        break;
+
       case 'exportReport':
         result = { success: false, message: 'Gunakan POST untuk exportReport agar token tidak dikirim via URL' };
         break;
@@ -4448,6 +4481,8 @@ function doGet(e) {
             'getCategories',
             'getBankAccounts',
             'getLogs',
+            'getProfile',
+            'getUnpaidMonths',
             'exportReport'
           ]
         };
@@ -4535,6 +4570,11 @@ function doPost(e) {
       case 'deleteUser':
         if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = deleteUser(data.user_id, user.id);
+        break;
+
+      case 'changeUserRole':
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        result = changeUserRole(data.user_id || data.userid, data.new_role || data.newrole, user.id);
         break;
         
       // Transaction management
@@ -4686,7 +4726,7 @@ function doPost(e) {
           message: 'Action tidak dikenali',
           available_actions: [
             'login', 'logout', 'register',
-            'updateUser', 'approveUser', 'rejectUser', 'deleteUser',
+            'updateUser', 'approveUser', 'rejectUser', 'deleteUser', 'changeUserRole',
             'createTransaction', 'updateTransaction', 'validateTransaction', 'deleteTransaction',
             'savePaymentDraft', 'getPaymentDraft', 'submitPayment',
             'createCategory', 'updateCategory', 'deleteCategory',
@@ -4754,14 +4794,20 @@ function getUnpaidMonths(userId) {
     // Check last 12 months
     const unpaid = [];
     for (let i = 0; i < 12; i++) {
-      const date = new Date(currentYear, currentMonth - 1 - i, 1);
-      const monthStr = formatDate(date, 'MM-YYYY'); // FIX format string
+      let calcMonth = currentMonth - i;
+      let calcYear = currentYear;
+      while (calcMonth <= 0) {
+        calcMonth += 12;
+        calcYear--;
+      }
+      const mm = String(calcMonth).padStart(2, '0');
+      const monthStr = `${mm}-${calcYear}`;
       
       if (!paidMonths.has(monthStr)) {
         unpaid.push({
           month: monthStr,
-          month_name: getMonthName(date.getMonth() + 1),
-          year: date.getFullYear()
+          month_name: getMonthName(calcMonth),
+          year: calcYear
         });
       }
     }
@@ -5615,6 +5661,11 @@ function _addTransactionDetailTable(body, transactions, hdrColor, stripeColor, i
        .setForegroundColor(isIncome ? incColor : expColor).setBold(true);
     row.getCell(5).editAsText()
        .setForegroundColor(isIncome ? incColor : expColor).setBold(true);
+  }
+
+  if (transactions.length === 0) {
+    body.appendParagraph('Tidak ada transaksi pada periode ini.')
+      .editAsText().setFontSize(10).setForegroundColor('#888888').setItalic(true);
   }
 }
 
