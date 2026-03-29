@@ -645,6 +645,7 @@ function loginUser(identifier, password) {
     
     // Cari user berdasarkan ID atau Email (case insensitive)
     let user = null;
+    let userRowIndex = -1;
     for (let i = 1; i < data.length; i++) {
       const rowId = String(data[i][0]).toLowerCase(); // id
       const rowEmail = String(data[i][4]).toLowerCase(); // email
@@ -654,6 +655,7 @@ function loginUser(identifier, password) {
         headers.forEach((header, index) => {
           user[header] = data[i][index];
         });
+        userRowIndex = i + 1;
         break;
       }
     }
@@ -697,9 +699,9 @@ function loginUser(identifier, password) {
     }
     
     // Update last login
-    const rowIndex = findRowIndex(sheet, 1, user.id);
-    if (rowIndex > 0) {
-      sheet.getRange(rowIndex, 13).setValue(getCurrentDateTime()); // last_login column
+    const lastLoginColumn = headers.indexOf('last_login') + 1;
+    if (lastLoginColumn > 0 && userRowIndex > 0) {
+      sheet.getRange(userRowIndex, lastLoginColumn).setValue(getCurrentDateTime());
     }
     
     // Generate session token
@@ -1105,9 +1107,6 @@ function updateUser(userId, userData, updatedBy) {
       };
     }
     
-    // Get current data
-    const currentData = sheet.getRange(rowIndex, 1, 1, 13).getValues()[0];
-    
     // Update fields
     if (userData.nama) sheet.getRange(rowIndex, 2).setValue(cleanString(userData.nama));
     if (userData.alamat) sheet.getRange(rowIndex, 3).setValue(cleanString(userData.alamat));
@@ -1411,16 +1410,20 @@ function getAllTransactions(filters = {}) {
     if (filters.category_id) transactions = transactions.filter(t => t.category_id === filters.category_id);
     if (filters.bulan_iuran) transactions = transactions.filter(t => t.bulan_iuran === filters.bulan_iuran);
     
-    // FIX BUG: Date filtering yang mencakup hingga jam 23:59:59 di hari terakhir
-    if (filters.start_date && filters.end_date) {
-      const start = new Date(filters.start_date);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(filters.end_date);
-      end.setHours(23, 59, 59, 999);
+    const startDateFilter = filters.start_date || filters.startdate;
+    const endDateFilter = filters.end_date || filters.enddate;
+    if (startDateFilter || endDateFilter) {
+      const start = startDateFilter ? new Date(startDateFilter) : null;
+      const end = endDateFilter ? new Date(endDateFilter) : null;
+      if (start) start.setHours(0, 0, 0, 0);
+      if (end) end.setHours(23, 59, 59, 999);
       
       transactions = transactions.filter(t => {
         const date = new Date(t.tanggal);
-        return date >= start && date <= end;
+        if (isNaN(date.getTime())) return false;
+        if (start && date < start) return false;
+        if (end && date > end) return false;
+        return true;
       });
     }
     
@@ -2543,9 +2546,15 @@ function getFilesByRelatedId(relatedId) {
  * Helper: Extract Drive ID secara aman menggunakan Regex
  */
 function extractDriveFileId(url) {
-  if (!url) return null;
-  const match = url.match(/[-\w]{25,}/);
-  return match ? match[0] : null;
+  if (!url || typeof url !== 'string') return null;
+
+  let match = url.match(/[?&]id=([\w-]{25,})/);
+  if (match) return match[1];
+
+  match = url.match(/\/file\/d\/([\w-]{25,})/);
+  if (match) return match[1];
+
+  return null;
 }
 
 /**
@@ -2769,6 +2778,10 @@ function updateMonthlyBalance(targetDate) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.MONTHLY_BALANCES);
     const dateObj = new Date(targetDate);
+    if (isNaN(dateObj.getTime())) {
+      console.error('updateMonthlyBalance: targetDate tidak valid:', targetDate);
+      return false;
+    }
     const targetMonth = dateObj.getMonth() + 1;
     const targetYear = dateObj.getFullYear();
     
@@ -2778,32 +2791,42 @@ function updateMonthlyBalance(targetDate) {
     const endMonth = maxDate.getMonth() + 1;
     const endYear = maxDate.getFullYear();
 
+    const allTx = getAllTransactions({ status: 'approved' }).data || [];
+    const txByMonth = {};
+    allTx.forEach(t => {
+      if (!t.tanggal) return;
+      const d = new Date(t.tanggal);
+      if (isNaN(d.getTime())) return;
+      const key = `${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+      if (!txByMonth[key]) txByMonth[key] = { income: 0, expense: 0 };
+      const nominal = Number(t.nominal) || 0;
+      if (t.type === 'income') txByMonth[key].income += nominal;
+      if (t.type === 'expense') txByMonth[key].expense += nominal;
+    });
+
     let calcYear = targetYear;
     let calcMonth = targetMonth;
+    let openingBalance = null;
     
     // Looping berhenti pada bulan dan tahun maksimal (sekarang, atau masa depan)
     while (calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) {
       const monthStr = String(calcMonth).padStart(2, '0');
       const bulanKey = `${monthStr}-${calcYear}`;
       
-      const startDate = `${calcYear}-${monthStr}-01`;
-      const lastDay = new Date(calcYear, calcMonth, 0).getDate();
-      const endDate = `${calcYear}-${monthStr}-${lastDay}`;
-      
-      const txData = getAllTransactions({ start_date: startDate, end_date: endDate, status: 'approved' }).data || [];
-      const totalIncome = txData.filter(t => t.type === 'income').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      const totalExpense = txData.filter(t => t.type === 'expense').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      
-      let openingBalance = 0;
-      const prevMonth = calcMonth === 1 ? 12 : calcMonth - 1;
-      const prevYear = calcMonth === 1 ? calcYear - 1 : calcYear;
-      const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
-      
-      const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
-      if (prevBalance) {
-        openingBalance = Number(prevBalance.closing_balance) || 0;
-      } else {
-        openingBalance = Number(getSetting('opening_balance')) || 0;
+      const monthData = txByMonth[bulanKey] || { income: 0, expense: 0 };
+      const totalIncome = monthData.income;
+      const totalExpense = monthData.expense;
+
+      if (openingBalance === null) {
+        const prevMonth = calcMonth === 1 ? 12 : calcMonth - 1;
+        const prevYear = calcMonth === 1 ? calcYear - 1 : calcYear;
+        const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
+        const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
+        if (prevBalance) {
+          openingBalance = Number(prevBalance.closing_balance) || 0;
+        } else {
+          openingBalance = Number(getSetting('opening_balance')) || 0;
+        }
       }
       
       const closingBalance = openingBalance + totalIncome - totalExpense;
@@ -2816,6 +2839,8 @@ function updateMonthlyBalance(targetDate) {
         insertRowWithLock(sheet, [generateId('BAL'), bulanKey, openingBalance, totalIncome, totalExpense, closingBalance, timestamp]);
       }
       
+      openingBalance = closingBalance;
+
       calcMonth++;
       if (calcMonth > 12) { calcMonth = 1; calcYear++; }
     }
@@ -2836,49 +2861,38 @@ function updateMonthlyBalance(targetDate) {
 function getBarChartData(year) {
   try {
     const targetYear = year || new Date().getFullYear();
-    const monthlyData = [];
-    
+    const allTx = getAllTransactions({
+      start_date: `${targetYear}-01-01`,
+      end_date: `${targetYear}-12-31`,
+      status: 'approved'
+    }).data || [];
+
+    const byMonth = {};
     for (let month = 1; month <= 12; month++) {
-      const startDate = `${targetYear}-${String(month).padStart(2, '0')}-01`;
-      const lastDay = new Date(targetYear, month, 0).getDate();
-      const endDate = `${targetYear}-${String(month).padStart(2, '0')}-${lastDay}`;
-      
-      const transactions = getAllTransactions({
-        start_date: startDate,
-        end_date: endDate,
-        status: 'approved'
-      });
-      
-      const txData = transactions.data || [];
-      
-      const income = txData
-        .filter(t => t.type === 'income')
-        .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      
-      const expense = txData
-        .filter(t => t.type === 'expense')
-        .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      
-      monthlyData.push({
-        month: getMonthName(month),
-        income: income,
-        expense: expense
-      });
+      byMonth[month] = { income: 0, expense: 0 };
     }
+
+    allTx.forEach(t => {
+      const d = new Date(t.tanggal);
+      if (isNaN(d.getTime())) return;
+      const month = d.getMonth() + 1;
+      if (t.type === 'income') byMonth[month].income += Number(t.nominal) || 0;
+      if (t.type === 'expense') byMonth[month].expense += Number(t.nominal) || 0;
+    });
     
     return {
       success: true,
       data: {
-        labels: monthlyData.map(d => d.month),
+        labels: Array.from({ length: 12 }, (_, i) => getMonthName(i + 1)),
         datasets: [
           {
             label: 'Pemasukan',
-            data: monthlyData.map(d => d.income),
+            data: Array.from({ length: 12 }, (_, i) => byMonth[i + 1].income),
             backgroundColor: '#4CAF50'
           },
           {
             label: 'Pengeluaran',
-            data: monthlyData.map(d => d.expense),
+            data: Array.from({ length: 12 }, (_, i) => byMonth[i + 1].expense),
             backgroundColor: '#F44336'
           }
         ]
@@ -2897,11 +2911,19 @@ function getBarChartData(year) {
  */
 function getPieChartData(filters = {}) {
   try {
-    const transactions = getAllTransactions({
+    const queryFilters = {
       ...filters,
       type: 'expense',
       status: 'approved'
-    });
+    };
+    if (filters.year && !filters.start_date && !filters.end_date) {
+      const parsedYear = parseInt(filters.year, 10);
+      if (!isNaN(parsedYear)) {
+        queryFilters.start_date = `${parsedYear}-01-01`;
+        queryFilters.end_date = `${parsedYear}-12-31`;
+      }
+    }
+    const transactions = getAllTransactions(queryFilters);
     
     const txData = transactions.data || [];
     
@@ -2952,30 +2974,27 @@ function getLineChartData(year) {
     const targetYear = year || new Date().getFullYear();
     const monthlyBalances = [];
     let runningBalance = Number(getSetting('opening_balance')) || 0;
-    
+    const allTx = getAllTransactions({
+      start_date: `${targetYear}-01-01`,
+      end_date: `${targetYear}-12-31`,
+      status: 'approved'
+    }).data || [];
+
+    const byMonth = {};
     for (let month = 1; month <= 12; month++) {
-      const startDate = `${targetYear}-${String(month).padStart(2, '0')}-01`;
-      const lastDay = new Date(targetYear, month, 0).getDate();
-      const endDate = `${targetYear}-${String(month).padStart(2, '0')}-${lastDay}`;
-      
-      const transactions = getAllTransactions({
-        start_date: startDate,
-        end_date: endDate,
-        status: 'approved'
-      });
-      
-      const txData = transactions.data || [];
-      
-      const income = txData
-        .filter(t => t.type === 'income')
-        .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      
-      const expense = txData
-        .filter(t => t.type === 'expense')
-        .reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-      
-      runningBalance += income - expense;
-      
+      byMonth[month] = { income: 0, expense: 0 };
+    }
+
+    allTx.forEach(t => {
+      const d = new Date(t.tanggal);
+      if (isNaN(d.getTime())) return;
+      const month = d.getMonth() + 1;
+      if (t.type === 'income') byMonth[month].income += Number(t.nominal) || 0;
+      if (t.type === 'expense') byMonth[month].expense += Number(t.nominal) || 0;
+    });
+
+    for (let month = 1; month <= 12; month++) {
+      runningBalance += byMonth[month].income - byMonth[month].expense;
       monthlyBalances.push({
         month: getMonthName(month),
         balance: runningBalance
@@ -3065,24 +3084,30 @@ function generateColors(count) {
 function logActivity(userId, action, entity, entityId, metadata = {}) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.LOGS);
-    
-    const logId = generateId(CONFIG.ID_PREFIX.LOG);
-    const now = getCurrentDateTime();
-    
-    const rowData = [
-      logId,
-      userId,
-      action,
-      entity,
-      entityId,
-      JSON.stringify(metadata),
-      now
-    ];
-    
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
-    
-    return logId;
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) {
+      console.warn(`logActivity: gagal lock, log dilewati untuk action=${action}`);
+      return null;
+    }
+    try {
+      const logId = generateId(CONFIG.ID_PREFIX.LOG);
+      const now = getCurrentDateTime();
+      const rowData = [
+        logId,
+        userId,
+        action,
+        entity,
+        String(entityId),
+        JSON.stringify(metadata),
+        now
+      ];
+      const lastRow = sheet.getLastRow();
+      sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+      SpreadsheetApp.flush();
+      return logId;
+    } finally {
+      lock.releaseLock();
+    }
   } catch (error) {
     console.error('Error logging activity:', error);
     return null;
@@ -3235,22 +3260,28 @@ function sendPaymentNotification(userId, transactionId) {
 function savePaymentDraft(userId, step, dataJson) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
-    
-    // Check existing draft
-    const existingDraft = findRowByValue(sheet, 2, userId);
+    const rows = sheet.getDataRange().getValues();
+    let existingRowIndex = -1;
+    let existingDraftId = null;
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (String(rows[i][1]) === String(userId) && String(rows[i][4]) === 'draft') {
+        existingRowIndex = i + 1;
+        existingDraftId = rows[i][0];
+        break;
+      }
+    }
     
     const now = getCurrentDateTime();
     
-    if (existingDraft && existingDraft.status === 'draft') {
+    if (existingRowIndex > 0) {
       // Update existing draft
-      const rowIndex = findRowIndex(sheet, 2, userId);
-      sheet.getRange(rowIndex, 3).setValue(step);
-      sheet.getRange(rowIndex, 4).setValue(typeof dataJson === 'string' ? dataJson : JSON.stringify(dataJson));
+      sheet.getRange(existingRowIndex, 3).setValue(step);
+      sheet.getRange(existingRowIndex, 4).setValue(typeof dataJson === 'string' ? dataJson : JSON.stringify(dataJson));
       
       return {
         success: true,
         message: 'Draft berhasil disimpan',
-        data: { id: existingDraft.id }
+        data: { id: existingDraftId }
       };
     } else {
       // Create new draft
@@ -4212,7 +4243,7 @@ function doGet(e) {
           status: e.parameter.status,
           start_date: e.parameter.start_date,
           end_date: e.parameter.end_date,
-          user_id: user.role !== 'admin' ? user.id : e.parameter.user_id
+          user_id: user.role !== 'admin' ? user.id : cleanString(e.parameter.user_id || '')
         });
         break;
         
@@ -4488,18 +4519,22 @@ function doPost(e) {
         
       // Testing endpoints (untuk development)
       case 'runTests':
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = runAllTests();
         break;
         
       case 'insertDummyData':
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = insertDummyData();
         break;
         
       case 'initializeSheets':
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = initializeAllSheets();
         break;
         
       case 'initializeDrive':
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = initializeDriveFolders();
         break;
         
@@ -4690,20 +4725,31 @@ function searchData(query, type = 'all') {
  */
 function exportToCSV(type, filters = {}) {
   try {
-    let data = [];
     let headers = [];
+    let rows = [];
+    const escapeCSV = (value) => {
+      const str = String(value === null || value === undefined ? '' : value);
+      if (/["\n,]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
     
     switch (type) {
       case 'transactions':
         const txResult = getAllTransactions(filters);
-        data = txResult.data || [];
         headers = ['ID', 'Tanggal', 'Type', 'Source', 'Nominal', 'Status', 'Deskripsi'];
+        rows = (txResult.data || []).map(item => [
+          item.id, item.tanggal, item.type, item.source, item.nominal, item.status, item.deskripsi || ''
+        ]);
         break;
         
       case 'users':
         const userResult = getAllUsers(filters);
-        data = userResult.data || [];
         headers = ['ID', 'Nama', 'Alamat', 'No HP', 'Email', 'Status'];
+        rows = (userResult.data || []).map(item => [
+          item.id, item.nama, item.alamat, item.no_hp, item.email || '', item.status
+        ]);
         break;
         
       default:
@@ -4714,19 +4760,14 @@ function exportToCSV(type, filters = {}) {
     }
     
     // Convert to CSV
-    let csv = headers.join(',') + '\n';
-    
-    data.forEach(item => {
-      if (type === 'transactions') {
-        csv += `"${item.id}","${item.tanggal}","${item.type}","${item.source}","${item.nominal}","${item.status}","${item.deskripsi || ''}"\n`;
-      } else if (type === 'users') {
-        csv += `"${item.id}","${item.nama}","${item.alamat}","${item.no_hp}","${item.email || ''}","${item.status}"\n`;
-      }
-    });
+    const csvLines = [
+      headers.map(escapeCSV).join(','),
+      ...rows.map(row => row.map(escapeCSV).join(','))
+    ];
     
     return {
       success: true,
-      data: csv,
+      data: csvLines.join('\n'),
       filename: `${type}_${formatDate(new Date(), 'YYYY-MM-DD')}.csv`
     };
   } catch (error) {
