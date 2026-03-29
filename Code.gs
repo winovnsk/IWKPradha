@@ -662,6 +662,13 @@ function loginUser(identifier, password) {
     }
     
     // Cek status user
+    if (user.status === 'deleted') {
+      return {
+        success: false,
+        message: 'Akun Anda sudah dinonaktifkan'
+      };
+    }
+
     if (user.status === 'pending') {
       return {
         success: false,
@@ -1025,6 +1032,11 @@ function getAllUsers(filters = {}) {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
     const data = sheet.getDataRange().getValues();
     let users = sheetToArray(data);
+
+    // Secara default, sembunyikan user yang sudah di-soft delete
+    if (!filters.include_deleted) {
+      users = users.filter(u => u.status !== 'deleted');
+    }
     
     // Remove password hash
     users = users.map(user => {
@@ -1209,18 +1221,15 @@ function deleteUser(userId, adminId) {
       };
     }
     
-    // Get user data sebelum dihapus
-    const userData = findRowByValue(sheet, 1, userId);
-    
-    // Hapus row
-    sheet.deleteRow(rowIndex);
+    // Soft delete: ubah status user menjadi deleted
+    sheet.getRange(rowIndex, 8).setValue('deleted');
     
     // Log aktivitas
-    logActivity(adminId, 'DELETE_USER', 'users', userId, { deleted_user: userData });
+    logActivity(adminId, 'DELETE_USER', 'users', userId, { action: 'soft_delete' });
     
     return {
       success: true,
-      message: 'User berhasil dihapus'
+      message: 'User berhasil dihapus (dinonaktifkan)'
     };
   } catch (error) {
     return {
@@ -1468,6 +1477,9 @@ function updateTransaction(transactionId, transactionData, updatedBy) {
       };
     }
     
+    // Ambil tanggal lama sebelum update untuk sinkronisasi saldo bulanan
+    const oldTanggal = sheet.getRange(rowIndex, 7).getValue();
+
     // Update fields
     if (transactionData.type) sheet.getRange(rowIndex, 3).setValue(transactionData.type);
     if (transactionData.source) sheet.getRange(rowIndex, 4).setValue(transactionData.source);
@@ -1481,9 +1493,10 @@ function updateTransaction(transactionId, transactionData, updatedBy) {
     if (transactionData.status) sheet.getRange(rowIndex, 12).setValue(transactionData.status);
     if (transactionData.deskripsi !== undefined) sheet.getRange(rowIndex, 13).setValue(cleanString(transactionData.deskripsi));
     
-    // Update monthly balance
-    const tanggal = sheet.getRange(rowIndex, 7).getValue();
-    updateMonthlyBalance(tanggal);
+    // Update monthly balance dari tanggal paling lampau (antara tanggal lama vs baru)
+    const newTanggal = transactionData.tanggal || oldTanggal;
+    const dateToUpdate = new Date(oldTanggal) < new Date(newTanggal) ? oldTanggal : newTanggal;
+    updateMonthlyBalance(dateToUpdate);
     
     // Log aktivitas
     logActivity(updatedBy, 'UPDATE_TRANSACTION', 'transactions', transactionId, transactionData);
@@ -2436,26 +2449,27 @@ function uploadFile(base64Data, fileName, folderType, relatedId, uploadedBy) {
     // Set public access
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     
-    const fileUrl = file.getUrl();
+    const fileId = file.getId();
+    const directUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
     
     // Save ke files sheet
     saveFileRecord({
       related_id: relatedId,
       type: folderType,
       file_name: fileName,
-      file_url: fileUrl,
+      file_url: directUrl,
       uploaded_by: uploadedBy
     });
     
     // Log aktivitas
-    logActivity(uploadedBy, 'UPLOAD_FILE', 'files', file.getId(), { fileName, folderType });
+    logActivity(uploadedBy, 'UPLOAD_FILE', 'files', fileId, { fileName, folderType });
     
     return {
       success: true,
       message: 'File berhasil diupload',
       data: {
-        file_id: file.getId(),
-        file_url: fileUrl,
+        file_id: fileId,
+        file_url: directUrl,
         file_name: fileName
       }
     };
