@@ -546,6 +546,20 @@ function isValidPhoneNumber(phone) {
 }
 
 /**
+ * Normalisasi nomor HP ke format canonical (628xxxxxxxxxx)
+ */
+function normalizePhoneNumber(phone) {
+  if (!phone) return '';
+  let formatted = String(phone).replace(/[^0-9+]/g, '');
+  if (formatted.startsWith('+62')) {
+    formatted = '62' + formatted.substring(3);
+  } else if (formatted.startsWith('0')) {
+    formatted = '62' + formatted.substring(1);
+  }
+  return formatted;
+}
+
+/**
  * Format nomor HP ke format WhatsApp
  */
 function formatWhatsAppNumber(phone) {
@@ -892,10 +906,19 @@ function cleanupExpiredSessions() {
 }
 
 /**
+ * Normalisasi token auth (dukung format Bearer)
+ */
+function normalizeAuthToken(rawToken) {
+  if (!rawToken) return '';
+  const token = String(rawToken).trim();
+  return token.toLowerCase().startsWith('bearer ') ? token.substring(7).trim() : token;
+}
+
+/**
  * Middleware untuk mengecek autentikasi
  */
 function requireAuth(request) {
-  const token = request.headers?.Authorization || request.token;
+  const token = normalizeAuthToken(request.headers?.Authorization || request.token);
   
   if (!token) {
     return {
@@ -956,7 +979,8 @@ function registerUser(userData) {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
     
     // Cek duplikat no_hp dan email
-    const existingPhone = findRowByValue(sheet, 4, userData.no_hp);
+    const normalizedPhone = normalizePhoneNumber(userData.no_hp);
+    const existingPhone = findRowByValue(sheet, 4, normalizedPhone);
     if (existingPhone) {
       return {
         success: false,
@@ -965,7 +989,7 @@ function registerUser(userData) {
     }
     
     if (userData.email) {
-      const existingEmail = findRowByValue(sheet, 5, userData.email);
+      const existingEmail = findRowByValue(sheet, 5, cleanString(userData.email).toLowerCase());
       if (existingEmail) {
         return {
           success: false,
@@ -986,8 +1010,8 @@ function registerUser(userData) {
       userId,
       cleanString(userData.nama),
       cleanString(userData.alamat),
-      cleanString(userData.no_hp),
-      cleanString(userData.email) || '',
+      normalizedPhone,
+      cleanString(userData.email).toLowerCase() || '',
       passwordHash,
       'warga', // default role
       'pending', // default status
@@ -1133,19 +1157,42 @@ function updateUser(userId, userData, updatedBy) {
       };
     }
     
-    // Validasi input
-    const validation = validateUserData(userData, false);
-    if (!validation.valid) {
-      return {
-        success: false,
-        message: validation.message
-      };
+    // Validasi input hanya untuk field yang dikirim (partial update)
+    if (userData.nama !== undefined && cleanString(userData.nama).length < 3) {
+      return { success: false, message: 'Nama minimal 3 karakter' };
+    }
+    if (userData.alamat !== undefined && cleanString(userData.alamat).length < 5) {
+      return { success: false, message: 'Alamat minimal 5 karakter' };
+    }
+    if (userData.no_hp !== undefined && !isValidPhoneNumber(userData.no_hp)) {
+      return { success: false, message: 'Format nomor HP tidak valid' };
+    }
+    if (userData.email !== undefined && userData.email && !isValidEmail(userData.email)) {
+      return { success: false, message: 'Format email tidak valid' };
+    }
+
+    // Cek duplikasi nomor HP/email (kecuali milik user saat ini)
+    if (userData.no_hp !== undefined) {
+      const normalizedPhone = normalizePhoneNumber(userData.no_hp);
+      const existingPhone = findRowByValue(sheet, 4, normalizedPhone);
+      if (existingPhone && existingPhone.id !== userId) {
+        return { success: false, message: 'Nomor HP sudah terdaftar' };
+      }
+      userData.no_hp = normalizedPhone;
+    }
+    if (userData.email !== undefined) {
+      const normalizedEmail = cleanString(userData.email).toLowerCase();
+      const existingEmail = normalizedEmail ? findRowByValue(sheet, 5, normalizedEmail) : null;
+      if (existingEmail && existingEmail.id !== userId) {
+        return { success: false, message: 'Email sudah terdaftar' };
+      }
+      userData.email = normalizedEmail;
     }
     
     // Update fields
-    if (userData.nama) sheet.getRange(rowIndex, 2).setValue(cleanString(userData.nama));
-    if (userData.alamat) sheet.getRange(rowIndex, 3).setValue(cleanString(userData.alamat));
-    if (userData.no_hp) sheet.getRange(rowIndex, 4).setValue(cleanString(userData.no_hp));
+    if (userData.nama !== undefined) sheet.getRange(rowIndex, 2).setValue(cleanString(userData.nama));
+    if (userData.alamat !== undefined) sheet.getRange(rowIndex, 3).setValue(cleanString(userData.alamat));
+    if (userData.no_hp !== undefined) sheet.getRange(rowIndex, 4).setValue(userData.no_hp);
     if (userData.email !== undefined) sheet.getRange(rowIndex, 5).setValue(cleanString(userData.email));
     if (userData.foto_url !== undefined) sheet.getRange(rowIndex, 9).setValue(userData.foto_url);
     
@@ -4438,7 +4485,7 @@ function doPost(e) {
   }
 
   const action = data.action;
-  const token = data.token || (e && e.parameter ? e.parameter.token : null);
+  const token = normalizeAuthToken(data.token || (e && e.parameter ? e.parameter.token : null));
 
   // IMPLEMENTASI MIDDLEWARE:
   const auth = requireAuth({ token: token });
