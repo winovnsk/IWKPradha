@@ -601,6 +601,11 @@ function cleanString(str) {
  * Validasi dan format nominal
  */
 function formatNominal(nominal) {
+  if (!nominal) return 0;
+  // Jika input berupa string (misal: "100.000" atau "Rp100.000")
+  if (typeof nominal === 'string') {
+    nominal = nominal.replace(/[^0-9-]/g, ''); // Buang semua huruf dan tanda baca kecuali minus dan angka
+  }
   return Number(nominal) || 0;
 }
 
@@ -1057,10 +1062,10 @@ function getAllUsers(filters = {}) {
     if (filters.search) {
       const search = filters.search.toLowerCase();
       users = users.filter(u => 
-        u.nama?.toLowerCase().includes(search) ||
-        u.alamat?.toLowerCase().includes(search) ||
-        u.no_hp?.toLowerCase().includes(search) ||
-        u.email?.toLowerCase().includes(search)
+        String(u.nama || '').toLowerCase().includes(search) ||
+        String(u.alamat || '').toLowerCase().includes(search) ||
+        String(u.no_hp || '').toLowerCase().includes(search) ||
+        String(u.email || '').toLowerCase().includes(search)
       );
     }
     
@@ -1399,42 +1404,32 @@ function getAllTransactions(filters = {}) {
     let transactions = sheetToArray(data);
     
     // Apply filters
-    if (filters.type) {
-      transactions = transactions.filter(t => t.type === filters.type);
-    }
+    if (filters.type) transactions = transactions.filter(t => t.type === filters.type);
+    if (filters.status) transactions = transactions.filter(t => t.status === filters.status);
+    if (filters.user_id) transactions = transactions.filter(t => t.user_id === filters.user_id);
+    if (filters.source) transactions = transactions.filter(t => t.source === filters.source);
+    if (filters.category_id) transactions = transactions.filter(t => t.category_id === filters.category_id);
+    if (filters.bulan_iuran) transactions = transactions.filter(t => t.bulan_iuran === filters.bulan_iuran);
     
-    if (filters.status) {
-      transactions = transactions.filter(t => t.status === filters.status);
-    }
-    
-    if (filters.user_id) {
-      transactions = transactions.filter(t => t.user_id === filters.user_id);
-    }
-    
-    if (filters.source) {
-      transactions = transactions.filter(t => t.source === filters.source);
-    }
-    
-    if (filters.category_id) {
-      transactions = transactions.filter(t => t.category_id === filters.category_id);
-    }
-    
+    // FIX BUG: Date filtering yang mencakup hingga jam 23:59:59 di hari terakhir
     if (filters.start_date && filters.end_date) {
+      const start = new Date(filters.start_date);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(filters.end_date);
+      end.setHours(23, 59, 59, 999);
+      
       transactions = transactions.filter(t => {
         const date = new Date(t.tanggal);
-        return date >= new Date(filters.start_date) && date <= new Date(filters.end_date);
+        return date >= start && date <= end;
       });
     }
     
-    if (filters.bulan_iuran) {
-      transactions = transactions.filter(t => t.bulan_iuran === filters.bulan_iuran);
-    }
-    
+    // FIX BUG: Mencegah crash jika deskripsi kosong
     if (filters.search) {
       const search = filters.search.toLowerCase();
       transactions = transactions.filter(t => 
-        t.deskripsi?.toLowerCase().includes(search) ||
-        t.id?.toLowerCase().includes(search)
+        String(t.deskripsi || '').toLowerCase().includes(search) ||
+        String(t.id || '').toLowerCase().includes(search)
       );
     }
     
@@ -2060,9 +2055,9 @@ function getAllEvents(filters = {}) {
     if (filters.search) {
       const search = filters.search.toLowerCase();
       events = events.filter(e => 
-        e.title?.toLowerCase().includes(search) ||
-        e.description?.toLowerCase().includes(search) ||
-        e.lokasi?.toLowerCase().includes(search)
+        String(e.title || '').toLowerCase().includes(search) ||
+        String(e.description || '').toLowerCase().includes(search) ||
+        String(e.lokasi || '').toLowerCase().includes(search)
       );
     }
     
@@ -2776,54 +2771,54 @@ function updateMonthlyBalance(targetDate) {
     const dateObj = new Date(targetDate);
     const targetMonth = dateObj.getMonth() + 1;
     const targetYear = dateObj.getFullYear();
-
+    
     const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    // FIX BUG: Jika transaksi adalah masa depan, gunakan targetDate sebagai batas akhir looping, bukan 'now'
+    const maxDate = dateObj > now ? dateObj : now;
+    const endMonth = maxDate.getMonth() + 1;
+    const endYear = maxDate.getFullYear();
 
-    // Loop dari bulan target sampai bulan saat ini
     let calcYear = targetYear;
     let calcMonth = targetMonth;
-
-    while (calcYear < currentYear || (calcYear === currentYear && calcMonth <= currentMonth)) {
+    
+    // Looping berhenti pada bulan dan tahun maksimal (sekarang, atau masa depan)
+    while (calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) {
       const monthStr = String(calcMonth).padStart(2, '0');
       const bulanKey = `${monthStr}-${calcYear}`;
-
+      
       const startDate = `${calcYear}-${monthStr}-01`;
       const lastDay = new Date(calcYear, calcMonth, 0).getDate();
       const endDate = `${calcYear}-${monthStr}-${lastDay}`;
-
+      
       const txData = getAllTransactions({ start_date: startDate, end_date: endDate, status: 'approved' }).data || [];
       const totalIncome = txData.filter(t => t.type === 'income').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
       const totalExpense = txData.filter(t => t.type === 'expense').reduce((sum, t) => sum + (Number(t.nominal) || 0), 0);
-
+      
       let openingBalance = 0;
       const prevMonth = calcMonth === 1 ? 12 : calcMonth - 1;
       const prevYear = calcMonth === 1 ? calcYear - 1 : calcYear;
       const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
-
+      
       const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
       if (prevBalance) {
         openingBalance = Number(prevBalance.closing_balance) || 0;
       } else {
         openingBalance = Number(getSetting('opening_balance')) || 0;
       }
-
+      
       const closingBalance = openingBalance + totalIncome - totalExpense;
       const existingRow = findRowIndex(sheet, 2, bulanKey);
       const timestamp = getCurrentDateTime();
-
+      
       if (existingRow > 0) {
         sheet.getRange(existingRow, 3, 1, 5).setValues([[openingBalance, totalIncome, totalExpense, closingBalance, timestamp]]);
       } else {
         insertRowWithLock(sheet, [generateId('BAL'), bulanKey, openingBalance, totalIncome, totalExpense, closingBalance, timestamp]);
       }
-
-      // Maju ke bulan berikutnya
+      
       calcMonth++;
       if (calcMonth > 12) { calcMonth = 1; calcYear++; }
     }
-
     return true;
   } catch (error) {
     console.error('Error updating monthly balance:', error);
@@ -3995,7 +3990,7 @@ function insertDummyData() {
         category_id: 'CAT-IWK',
         nominal: 100000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 5), 'YYYY-MM-DD'),
-        bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'DD-MM-YYYY'),
+        bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
         metode_pembayaran: 'transfer',
         status: 'approved'
       },
@@ -4006,7 +4001,7 @@ function insertDummyData() {
         category_id: 'CAT-IWK',
         nominal: 100000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 10), 'YYYY-MM-DD'),
-        bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'DD-MM-YYYY'),
+        bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
         metode_pembayaran: 'transfer',
         status: 'approved'
       },
@@ -4351,7 +4346,14 @@ function doPost(e) {
       // User management
       case 'updateUser':
         if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
-        result = updateUser(data.user_id || user.id, data, user.id);
+        
+        // FIX BUG IDOR: Jika bukan admin, paksa target ID menjadi ID dirinya sendiri (tidak bisa bajak akun orang)
+        let targetUserId = data.user_id || user.id;
+        if (user.role !== 'admin' && data.user_id && data.user_id !== user.id) {
+          return ContentService.createTextOutput(JSON.stringify({ success: false, message: 'Akses ditolak: Anda hanya dapat mengubah data Anda sendiri' })).setMimeType(ContentService.MimeType.JSON);
+        }
+        
+        result = updateUser(targetUserId, data, user.id);
         break;
         
       case 'approveUser':
@@ -4371,12 +4373,14 @@ function doPost(e) {
         
       // Transaction management
       case 'createTransaction':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        // FIX BUG PRIVILEGE: Hanya admin yang boleh create transaksi bebas langsung
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = createTransaction(data, user.id);
         break;
         
       case 'updateTransaction':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        // FIX BUG PRIVILEGE: Hanya admin yang boleh edit transaksi/mengubah status jadi approved
+        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
         result = updateTransaction(data.transaction_id, data, user.id);
         break;
         
