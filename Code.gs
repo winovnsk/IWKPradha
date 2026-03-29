@@ -56,8 +56,8 @@ const CONFIG = {
     PROFILES: 'profiles'
   },
 
-  // Salt untuk hash password
-  PASSWORD_SALT: 'IWK_RT11_SecureSalt_2026', // Jangan ubah setelah rilis
+  // Salt untuk hash password (wajib di Script Properties)
+  PASSWORD_SALT: '',
   
   // Prefix ID untuk setiap entitas
   ID_PREFIX: {
@@ -412,9 +412,23 @@ function formatDate(date, format = 'DD-MM-YYYY') {
 /**
  * Hash password menggunakan SHA-256
  */
+function setupSecureProperties() {
+  const props = PropertiesService.getScriptProperties();
+  const existingSalt = props.getProperty('PASSWORD_SALT');
+
+  if (!existingSalt) {
+    const generatedSalt = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty('PASSWORD_SALT', generatedSalt);
+    console.log('PASSWORD_SALT berhasil dibuat di Script Properties');
+    return generatedSalt;
+  }
+
+  return existingSalt;
+}
+
 function getPasswordSalt() {
   const scriptProps = PropertiesService.getScriptProperties();
-  return scriptProps.getProperty('PASSWORD_SALT') || CONFIG.PASSWORD_SALT;
+  return scriptProps.getProperty('PASSWORD_SALT') || setupSecureProperties();
 }
 
 function hashPassword(password) {
@@ -462,14 +476,17 @@ function sheetToArray(sheetData) {
 /**
  * Find row index by column value
  */
-function findRowIndex(sheet, columnIndex, searchValue) {
+function findRowIndex(sheet, columnIndex, searchValue, caseSensitive = false) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return -1;
   // Optimasi: Hanya baca 1 kolom yang dicari, bukan seluruh data sheet
   const columnData = sheet.getRange(2, columnIndex, lastRow - 1, 1).getValues();
-  const searchStr = String(searchValue).toLowerCase();
+  const searchStr = caseSensitive ? String(searchValue) : String(searchValue).toLowerCase();
   for (let i = 0; i < columnData.length; i++) {
-    if (String(columnData[i][0]).toLowerCase() === searchStr) return i + 2;
+    const cellStr = caseSensitive
+      ? String(columnData[i][0])
+      : String(columnData[i][0]).toLowerCase();
+    if (cellStr === searchStr) return i + 2;
   }
   return -1;
 }
@@ -477,8 +494,8 @@ function findRowIndex(sheet, columnIndex, searchValue) {
 /**
  * Find row data by column value
  */
-function findRowByValue(sheet, columnIndex, searchValue) {
-  const rowIndex = findRowIndex(sheet, columnIndex, searchValue);
+function findRowByValue(sheet, columnIndex, searchValue, caseSensitive = true) {
+  const rowIndex = findRowIndex(sheet, columnIndex, searchValue, caseSensitive);
   if (rowIndex > 0) {
     const lastCol = sheet.getLastColumn();
     const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
@@ -584,7 +601,7 @@ function encodeUrlParam(param) {
  */
 function getSetting(key) {
   const sheet = getSheet(CONFIG.SHEETS.SETTINGS);
-  const row = findRowByValue(sheet, 1, key);
+  const row = findRowByValue(sheet, 1, key, true);
   return row ? row.value : null;
 }
 
@@ -815,10 +832,11 @@ function verifySessionToken(token) {
     const user = getUserById(session.user_id);
     if (!user || user.status !== 'approved') return null;
 
-    // Sliding session expiry: perpanjang saat sisa masa berlaku sudah < 50%
+    // Sliding session expiry: perpanjang saat sisa masa berlaku sudah < 20%
     const timeoutMs = CONFIG.SESSION_TIMEOUT_HOURS * 60 * 60 * 1000;
     const remainingMs = new Date(session.expires_at).getTime() - Date.now();
-    if (remainingMs > 0 && remainingMs < timeoutMs / 2) {
+    const renewThreshold = 0.2;
+    if (remainingMs > 0 && (remainingMs / timeoutMs) < renewThreshold) {
       const newExpiry = new Date(Date.now() + timeoutMs).toISOString();
       session.expires_at = newExpiry;
       setSetting(sessionKey, JSON.stringify(session), 'Session token');
@@ -835,7 +853,7 @@ function verifySessionToken(token) {
  */
 function deleteSessionToken(token) {
   const sheet = getSheet(CONFIG.SHEETS.SETTINGS);
-  const rowIndex = findRowIndex(sheet, 1, `session_${token}`);
+  const rowIndex = findRowIndex(sheet, 1, `session_${token}`, true);
   
   if (rowIndex > 0) {
     sheet.deleteRow(rowIndex);
@@ -980,7 +998,7 @@ function registerUser(userData) {
     
     // Cek duplikat no_hp dan email
     const normalizedPhone = normalizePhoneNumber(userData.no_hp);
-    const existingPhone = findRowByValue(sheet, 4, normalizedPhone);
+    const existingPhone = findRowByValue(sheet, 4, normalizedPhone, false);
     if (existingPhone) {
       return {
         success: false,
@@ -989,7 +1007,7 @@ function registerUser(userData) {
     }
     
     if (userData.email) {
-      const existingEmail = findRowByValue(sheet, 5, cleanString(userData.email).toLowerCase());
+      const existingEmail = findRowByValue(sheet, 5, cleanString(userData.email).toLowerCase(), false);
       if (existingEmail) {
         return {
           success: false,
@@ -1080,7 +1098,7 @@ function validateUserData(userData, isRegistration = false) {
  */
 function getUserById(userId) {
   const sheet = getSheet(CONFIG.SHEETS.USERS);
-  const user = findRowByValue(sheet, 1, userId);
+  const user = findRowByValue(sheet, 1, userId, true);
   
   if (user) {
     delete user.password_hash;
@@ -1148,7 +1166,7 @@ function getAllUsers(filters = {}) {
 function updateUser(userId, userData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
-    const rowIndex = findRowIndex(sheet, 1, userId);
+    const rowIndex = findRowIndex(sheet, 1, userId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1174,7 +1192,7 @@ function updateUser(userId, userData, updatedBy) {
     // Cek duplikasi nomor HP/email (kecuali milik user saat ini)
     if (userData.no_hp !== undefined) {
       const normalizedPhone = normalizePhoneNumber(userData.no_hp);
-      const existingPhone = findRowByValue(sheet, 4, normalizedPhone);
+      const existingPhone = findRowByValue(sheet, 4, normalizedPhone, false);
       if (existingPhone && existingPhone.id !== userId) {
         return { success: false, message: 'Nomor HP sudah terdaftar' };
       }
@@ -1182,7 +1200,7 @@ function updateUser(userId, userData, updatedBy) {
     }
     if (userData.email !== undefined) {
       const normalizedEmail = cleanString(userData.email).toLowerCase();
-      const existingEmail = normalizedEmail ? findRowByValue(sheet, 5, normalizedEmail) : null;
+      const existingEmail = normalizedEmail ? findRowByValue(sheet, 5, normalizedEmail, false) : null;
       if (existingEmail && existingEmail.id !== userId) {
         return { success: false, message: 'Email sudah terdaftar' };
       }
@@ -1228,7 +1246,7 @@ function updateUser(userId, userData, updatedBy) {
 function approveUser(userId, adminId) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
-    const rowIndex = findRowIndex(sheet, 1, userId);
+    const rowIndex = findRowIndex(sheet, 1, userId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1265,7 +1283,7 @@ function approveUser(userId, adminId) {
 function rejectUser(userId, adminId, reason = '') {
   try {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
-    const rowIndex = findRowIndex(sheet, 1, userId);
+    const rowIndex = findRowIndex(sheet, 1, userId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1276,6 +1294,7 @@ function rejectUser(userId, adminId, reason = '') {
     
     // Update status
     sheet.getRange(rowIndex, 8).setValue('rejected');
+    invalidateUserSessions(userId);
     
     // Log aktivitas
     logActivity(adminId, 'REJECT_USER', 'users', userId, { reason: reason });
@@ -1298,7 +1317,7 @@ function rejectUser(userId, adminId, reason = '') {
 function deleteUser(userId, adminId) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.USERS);
-    const rowIndex = findRowIndex(sheet, 1, userId);
+    const rowIndex = findRowIndex(sheet, 1, userId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1309,6 +1328,7 @@ function deleteUser(userId, adminId) {
     
     // Soft delete: ubah status user menjadi deleted
     sheet.getRange(rowIndex, 8).setValue('deleted');
+    invalidateUserSessions(userId);
     
     // Log aktivitas
     logActivity(adminId, 'DELETE_USER', 'users', userId, { action: 'soft_delete' });
@@ -1338,7 +1358,7 @@ function changeUserRole(userId, newRole, adminId) {
     }
     
     const sheet = getSheet(CONFIG.SHEETS.USERS);
-    const rowIndex = findRowIndex(sheet, 1, userId);
+    const rowIndex = findRowIndex(sheet, 1, userId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1472,7 +1492,7 @@ function validateTransactionData(data) {
  */
 function getTransactionById(transactionId) {
   const sheet = getSheet(CONFIG.SHEETS.TRANSACTIONS);
-  return findRowByValue(sheet, 1, transactionId);
+  return findRowByValue(sheet, 1, transactionId, true);
 }
 
 /**
@@ -1566,7 +1586,7 @@ function validateTransactionDataForUpdate(data) {
 function updateTransaction(transactionId, transactionData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.TRANSACTIONS);
-    const rowIndex = findRowIndex(sheet, 1, transactionId);
+    const rowIndex = findRowIndex(sheet, 1, transactionId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1633,7 +1653,7 @@ function validateTransaction(transactionId, status, adminId, notes = '') {
     }
     
     const sheet = getSheet(CONFIG.SHEETS.TRANSACTIONS);
-    const rowIndex = findRowIndex(sheet, 1, transactionId);
+    const rowIndex = findRowIndex(sheet, 1, transactionId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1674,7 +1694,7 @@ function validateTransaction(transactionId, status, adminId, notes = '') {
 function deleteTransaction(transactionId, adminId) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.TRANSACTIONS);
-    const rowIndex = findRowIndex(sheet, 1, transactionId);
+    const rowIndex = findRowIndex(sheet, 1, transactionId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1684,7 +1704,7 @@ function deleteTransaction(transactionId, adminId) {
     }
     
     // Get transaction data sebelum dihapus
-    const transactionData = findRowByValue(sheet, 1, transactionId);
+    const transactionData = findRowByValue(sheet, 1, transactionId, true);
     
     // Hapus row
     sheet.deleteRow(rowIndex);
@@ -1813,7 +1833,7 @@ function getAllCategories(type = null) {
  */
 function getCategoryById(categoryId) {
   const sheet = getSheet(CONFIG.SHEETS.CATEGORIES);
-  return findRowByValue(sheet, 1, categoryId);
+  return findRowByValue(sheet, 1, categoryId, true);
 }
 
 /**
@@ -1822,7 +1842,7 @@ function getCategoryById(categoryId) {
 function updateCategory(categoryId, categoryData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.CATEGORIES);
-    const rowIndex = findRowIndex(sheet, 1, categoryId);
+    const rowIndex = findRowIndex(sheet, 1, categoryId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1857,7 +1877,7 @@ function updateCategory(categoryId, categoryData, updatedBy) {
 function deleteCategory(categoryId, deletedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.CATEGORIES);
-    const rowIndex = findRowIndex(sheet, 1, categoryId);
+    const rowIndex = findRowIndex(sheet, 1, categoryId, true);
     
     if (rowIndex < 0) {
       return {
@@ -1981,7 +2001,7 @@ function getAllBankAccounts(activeOnly = true) {
  */
 function getBankAccountById(accountId) {
   const sheet = getSheet(CONFIG.SHEETS.BANK_ACCOUNTS);
-  return findRowByValue(sheet, 1, accountId);
+  return findRowByValue(sheet, 1, accountId, true);
 }
 
 /**
@@ -1990,7 +2010,7 @@ function getBankAccountById(accountId) {
 function updateBankAccount(accountId, accountData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.BANK_ACCOUNTS);
-    const rowIndex = findRowIndex(sheet, 1, accountId);
+    const rowIndex = findRowIndex(sheet, 1, accountId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2034,7 +2054,7 @@ function updateBankAccount(accountId, accountData, updatedBy) {
 function deleteBankAccount(accountId, deletedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.BANK_ACCOUNTS);
-    const rowIndex = findRowIndex(sheet, 1, accountId);
+    const rowIndex = findRowIndex(sheet, 1, accountId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2129,7 +2149,7 @@ function createEvent(eventData, createdBy) {
  */
 function getEventById(eventId) {
   const sheet = getSheet(CONFIG.SHEETS.EVENTS);
-  return findRowByValue(sheet, 1, eventId);
+  return findRowByValue(sheet, 1, eventId, true);
 }
 
 /**
@@ -2201,7 +2221,7 @@ function getEventsForCalendar(year, month) {
 function updateEvent(eventId, eventData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.EVENTS);
-    const rowIndex = findRowIndex(sheet, 1, eventId);
+    const rowIndex = findRowIndex(sheet, 1, eventId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2241,7 +2261,7 @@ function updateEvent(eventId, eventData, updatedBy) {
 function deleteEvent(eventId, deletedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.EVENTS);
-    const rowIndex = findRowIndex(sheet, 1, eventId);
+    const rowIndex = findRowIndex(sheet, 1, eventId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2330,7 +2350,7 @@ function createAnnouncement(announcementData, createdBy) {
  */
 function getAnnouncementById(announcementId) {
   const sheet = getSheet(CONFIG.SHEETS.ANNOUNCEMENTS);
-  return findRowByValue(sheet, 1, announcementId);
+  return findRowByValue(sheet, 1, announcementId, true);
 }
 
 /**
@@ -2371,7 +2391,7 @@ function getAllAnnouncements(limit = 10) {
 function updateAnnouncement(announcementId, announcementData, updatedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.ANNOUNCEMENTS);
-    const rowIndex = findRowIndex(sheet, 1, announcementId);
+    const rowIndex = findRowIndex(sheet, 1, announcementId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2407,7 +2427,7 @@ function updateAnnouncement(announcementId, announcementData, updatedBy) {
 function deleteAnnouncement(announcementId, deletedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.ANNOUNCEMENTS);
-    const rowIndex = findRowIndex(sheet, 1, announcementId);
+    const rowIndex = findRowIndex(sheet, 1, announcementId, true);
     
     if (rowIndex < 0) {
       return {
@@ -2672,7 +2692,7 @@ function extractDriveFileId(url) {
 function deleteFile(fileId, deletedBy) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.FILES);
-    const fileRecord = findRowByValue(sheet, 1, fileId);
+    const fileRecord = findRowByValue(sheet, 1, fileId, true);
     
     if (!fileRecord) {
       return {
@@ -2891,6 +2911,13 @@ function updateMonthlyBalance(targetDate) {
       console.error('updateMonthlyBalance: targetDate tidak valid:', targetDate);
       return false;
     }
+    const maxDate = new Date();
+    maxDate.setMonth(maxDate.getMonth() + 1);
+    if (dateObj > maxDate) {
+      console.warn('updateMonthlyBalance: tanggal terlalu jauh ke depan, dilewati');
+      return false;
+    }
+
     const targetMonth = dateObj.getMonth() + 1;
     const targetYear = dateObj.getFullYear();
     
@@ -3194,7 +3221,7 @@ function generateColors(count) {
 function logActivity(userId, action, entity, entityId, metadata = {}) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.LOGS);
-    const lock = LockService.getScriptLock();
+    const lock = LockService.getUserLock();
     if (!lock.tryLock(5000)) {
       console.warn(`logActivity: gagal lock, log dilewati untuk action=${action}`);
       return null;
@@ -3478,6 +3505,26 @@ function getPaymentDraft(userId) {
  */
 function submitPayment(userId, paymentData) {
   try {
+    if (paymentData.bulan_iuran) {
+      const existingTransactions = getAllTransactions({
+        user_id: userId,
+        type: 'income',
+        source: 'IWK'
+      }).data || [];
+
+      const duplicate = existingTransactions.find(t =>
+        t.bulan_iuran === paymentData.bulan_iuran &&
+        (t.status === 'pending' || t.status === 'approved')
+      );
+
+      if (duplicate) {
+        return {
+          success: false,
+          message: `Pembayaran untuk bulan ${paymentData.bulan_iuran} sudah ada (status: ${duplicate.status})`
+        };
+      }
+    }
+
     // Create transaction
     const transactionResult = createTransaction({
       user_id: userId,
@@ -4325,6 +4372,12 @@ function clearDummyData() {
 // SECTION 20: WEB APP ENDPOINTS (DOGET/DOPOST)
 // ============================================================================
 
+function createJsonResponse(result) {
+  return ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 /**
  * Handle GET requests
  */
@@ -4462,7 +4515,11 @@ function doGet(e) {
         break;
 
       case 'exportReport':
-        result = { success: false, message: 'Gunakan POST untuk exportReport agar token tidak dikirim via URL' };
+        if (!user) {
+          result = { success: false, message: 'Autentikasi diperlukan' };
+          break;
+        }
+        result = exportReport(e.parameter, user);
         break;
         
       default:
@@ -4494,9 +4551,7 @@ function doGet(e) {
     };
   }
   
-  return ContentService
-    .createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
+  return createJsonResponse(result);
 }
 
 /**
@@ -4516,7 +4571,7 @@ function doPost(e) {
       }
     }
   } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({ success: false, message: 'Format JSON tidak valid' })).setMimeType(ContentService.MimeType.JSON);
+    return createJsonResponse({ success: false, message: 'Format JSON tidak valid' });
   }
 
   const action = data.action;
@@ -4546,177 +4601,175 @@ function doPost(e) {
         
       // User management
       case 'updateUser':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         
         // FIX BUG IDOR: Jika bukan admin, paksa target ID menjadi ID dirinya sendiri (tidak bisa bajak akun orang)
         let targetUserId = data.user_id || user.id;
         if (user.role !== 'admin' && data.user_id && data.user_id !== user.id) {
-          return ContentService.createTextOutput(JSON.stringify({ success: false, message: 'Akses ditolak: Anda hanya dapat mengubah data Anda sendiri' })).setMimeType(ContentService.MimeType.JSON);
+          return createJsonResponse({ success: false, message: 'Akses ditolak: Anda hanya dapat mengubah data Anda sendiri' });
         }
         
         result = updateUser(targetUserId, data, user.id);
         break;
         
       case 'approveUser':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = approveUser(data.user_id, user.id);
         break;
         
       case 'rejectUser':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = rejectUser(data.user_id, user.id, data.reason);
         break;
         
       case 'deleteUser':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteUser(data.user_id, user.id);
         break;
 
       case 'changeUserRole':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = changeUserRole(data.user_id || data.userid, data.new_role || data.newrole, user.id);
         break;
         
       // Transaction management
       case 'createTransaction':
         // FIX BUG PRIVILEGE: Hanya admin yang boleh create transaksi bebas langsung
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = createTransaction(data, user.id);
         break;
         
       case 'updateTransaction':
         // FIX BUG PRIVILEGE: Hanya admin yang boleh edit transaksi/mengubah status jadi approved
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateTransaction(data.transaction_id, data, user.id);
         break;
         
       case 'validateTransaction':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = validateTransaction(data.transaction_id, data.status, user.id, data.notes);
         break;
         
       case 'deleteTransaction':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteTransaction(data.transaction_id, user.id);
         break;
         
       // Payment submission
       case 'savePaymentDraft':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         result = savePaymentDraft(user.id, data.step, data.data);
         break;
         
       case 'getPaymentDraft':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         result = getPaymentDraft(user.id);
         break;
         
       case 'submitPayment':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         result = submitPayment(user.id, data);
         break;
         
       // Category management (admin)
       case 'createCategory':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = createCategory(data, user.id);
         break;
         
       case 'updateCategory':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateCategory(data.category_id, data, user.id);
         break;
         
       case 'deleteCategory':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteCategory(data.category_id, user.id);
         break;
         
       // Bank account management (admin)
       case 'createBankAccount':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = createBankAccount(data, user.id);
         break;
         
       case 'updateBankAccount':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateBankAccount(data.account_id, data, user.id);
         break;
         
       case 'deleteBankAccount':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteBankAccount(data.account_id, user.id);
         break;
         
       // Event management (admin)
       case 'createEvent':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = createEvent(data, user.id);
         break;
         
       case 'updateEvent':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateEvent(data.event_id, data, user.id);
         break;
         
       case 'deleteEvent':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteEvent(data.event_id, user.id);
         break;
         
       // Announcement management (admin)
       case 'createAnnouncement':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = createAnnouncement(data, user.id);
         break;
         
       case 'updateAnnouncement':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateAnnouncement(data.announcement_id, data, user.id);
         break;
         
       case 'deleteAnnouncement':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = deleteAnnouncement(data.announcement_id, user.id);
         break;
         
       // Settings management (admin)
       case 'updateSetting':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = updateSetting(data.key, data.value, data.description, user.id);
         break;
         
       // File upload
       case 'uploadFile':
-        if (!auth.authenticated) return ContentService.createTextOutput(JSON.stringify(auth)).setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         result = uploadFile(data.base64, data.file_name, data.folder_type, data.related_id, user.id);
         break;
 
       case 'exportReport':
-        if (!auth.authenticated) return ContentService
-          .createTextOutput(JSON.stringify(auth))
-          .setMimeType(ContentService.MimeType.JSON);
+        if (!auth.authenticated) return createJsonResponse(auth);
         result = exportReport(data, user);
         break;
         
       // Testing endpoints (untuk development)
       case 'runTests':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = runAllTests();
         break;
         
       case 'insertDummyData':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = insertDummyData();
         break;
         
       case 'initializeSheets':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = initializeAllSheets();
         break;
         
       case 'initializeDrive':
-        if (!adminCheck.authorized) return ContentService.createTextOutput(JSON.stringify(adminCheck)).setMimeType(ContentService.MimeType.JSON);
+        if (!adminCheck.authorized) return createJsonResponse(adminCheck);
         result = initializeDriveFolders();
         break;
         
@@ -4745,9 +4798,7 @@ function doPost(e) {
     };
   }
   
-  return ContentService
-    .createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
+  return createJsonResponse(result);
 }
 
 // ============================================================================
