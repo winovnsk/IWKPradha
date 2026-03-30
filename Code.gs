@@ -3079,20 +3079,24 @@ function updateMonthlyBalance(targetDate) {
       console.error('updateMonthlyBalance: targetDate tidak valid:', targetDate);
       return false;
     }
-    const maxDate = new Date();
-    maxDate.setMonth(maxDate.getMonth() + 1);
-    if (dateObj > maxDate) {
-      console.warn('updateMonthlyBalance: tanggal terlalu jauh ke depan, dilewati');
+
+    const now = new Date();
+    const endMonth = now.getMonth() + 1;
+    const endYear = now.getFullYear();
+
+    // Jangan proses tanggal lebih dari bulan ini
+    if (
+      dateObj.getFullYear() > endYear ||
+      (dateObj.getFullYear() === endYear && dateObj.getMonth() + 1 > endMonth)
+    ) {
+      console.warn('updateMonthlyBalance: tanggal melebihi bulan saat ini, dilewati');
       return false;
     }
 
     const targetMonth = dateObj.getMonth() + 1;
     const targetYear = dateObj.getFullYear();
-    
-    const now = new Date();
-    const endMonth = now.getMonth() + 1;
-    const endYear = now.getFullYear();
 
+    // Ambil semua transaksi approved sekali saja
     const allTx = getAllTransactions({ status: 'approved' }).data || [];
     const txByMonth = {};
     allTx.forEach(t => {
@@ -3110,51 +3114,60 @@ function updateMonthlyBalance(targetDate) {
     let calcMonth = targetMonth;
     let openingBalance = null;
     let iterCount = 0;
-    const MAX_ITER = 120; // Batas maksimum 10 tahun untuk mencegah loop terlalu panjang
-    
-    // Looping berhenti pada bulan dan tahun maksimal (sekarang, atau masa depan)
-    while ((calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) && iterCount < MAX_ITER) {
+    const MAX_ITER = 120;
+
+    while (
+      (calcYear < endYear || (calcYear === endYear && calcMonth <= endMonth)) &&
+      iterCount < MAX_ITER
+    ) {
       iterCount++;
       const monthStr = String(calcMonth).padStart(2, '0');
       const bulanKey = `${monthStr}-${calcYear}`;
-      
       const monthData = txByMonth[bulanKey] || { income: 0, expense: 0 };
-      const totalIncome = monthData.income;
-      const totalExpense = monthData.expense;
 
       if (openingBalance === null) {
         const prevMonth = calcMonth === 1 ? 12 : calcMonth - 1;
         const prevYear = calcMonth === 1 ? calcYear - 1 : calcYear;
         const prevBulanKey = `${String(prevMonth).padStart(2, '0')}-${prevYear}`;
         const prevBalance = findRowByValue(sheet, 2, prevBulanKey);
-        if (prevBalance) {
-          openingBalance = Number(prevBalance.closing_balance) || 0;
-        } else {
-          openingBalance = Number(getSetting('opening_balance')) || 0;
-        }
+        openingBalance = prevBalance
+          ? (Number(prevBalance.closing_balance) || 0)
+          : (Number(getSetting('opening_balance')) || 0);
       }
-      
+
+      const totalIncome = monthData.income;
+      const totalExpense = monthData.expense;
       const closingBalance = openingBalance + totalIncome - totalExpense;
       const existingRow = findRowIndex(sheet, 2, bulanKey);
       const timestamp = getCurrentDateTime();
-      
+
       if (existingRow > 0) {
-        sheet.getRange(existingRow, 3, 1, 5).setValues([[openingBalance, totalIncome, totalExpense, closingBalance, timestamp]]);
+        sheet.getRange(existingRow, 3, 1, 5).setValues([
+          [openingBalance, totalIncome, totalExpense, closingBalance, timestamp]
+        ]);
       } else {
-        insertRowWithLock(sheet, [generateId('BAL'), bulanKey, openingBalance, totalIncome, totalExpense, closingBalance, timestamp]);
+        insertRowWithLock(sheet, [
+          generateId('BAL'), bulanKey,
+          openingBalance, totalIncome, totalExpense, closingBalance, timestamp
+        ]);
       }
-      
+
       openingBalance = closingBalance;
 
       calcMonth++;
-      if (calcMonth > 12) { calcMonth = 1; calcYear++; }
+      if (calcMonth > 12) {
+        calcMonth = 1;
+        calcYear++;
+      }
     }
+
     return true;
   } catch (error) {
     console.error('Error updating monthly balance:', error);
     return false;
   }
 }
+
 
 // ============================================================================
 // SECTION 14: CHART DATA FUNCTIONS
@@ -3216,60 +3229,49 @@ function getBarChartData(year) {
  */
 function getPieChartData(filters = {}) {
   try {
-    const queryFilters = {
-      ...filters,
-      type: 'expense',
-      status: 'approved'
-    };
-    if (filters.year && !filters.start_date && !filters.end_date) {
+    const queryFilters = { type: 'expense', status: 'approved' };
+
+    // Prioritaskan start_date/end_date eksplisit; fallback ke year
+    if (filters.start_date && filters.end_date) {
+      queryFilters.start_date = filters.start_date;
+      queryFilters.end_date = filters.end_date;
+    } else if (filters.year) {
       const parsedYear = parseInt(filters.year, 10);
       if (!isNaN(parsedYear)) {
         queryFilters.start_date = `${parsedYear}-01-01`;
         queryFilters.end_date = `${parsedYear}-12-31`;
       }
     }
+
     const transactions = getAllTransactions(queryFilters);
-    
     const txData = transactions.data || [];
-    
-    // Get categories
+
     const categories = getAllCategories('expense');
     const catMap = {};
-    (categories.data || []).forEach(c => {
-      catMap[c.id] = c.name;
-    });
-    
-    // Group by category
+    (categories.data || []).forEach(c => { catMap[c.id] = c.name; });
+
     const categoryTotals = {};
     txData.forEach(t => {
-      const catId = t.category_id || 'Lainnya';
-      const catName = catMap[catId] || catId;
-      if (!categoryTotals[catName]) categoryTotals[catName] = 0;
-      categoryTotals[catName] += Number(t.nominal) || 0;
+      const catName = catMap[t.category_id] || t.category_id || 'Lainnya';
+      categoryTotals[catName] = (categoryTotals[catName] || 0) + (Number(t.nominal) || 0);
     });
-    
-    // Convert to chart format
+
     const labels = Object.keys(categoryTotals);
     const data = Object.values(categoryTotals);
     const colors = generateColors(labels.length);
-    
+
     return {
       success: true,
       data: {
-        labels: labels,
-        datasets: [{
-          data: data,
-          backgroundColor: colors
-        }]
+        labels,
+        datasets: [{ data, backgroundColor: colors }]
       }
     };
   } catch (error) {
-    return {
-      success: false,
-      message: `Error: ${error.message}`
-    };
+    return { success: false, message: `Error: ${error.message}` };
   }
 }
+
 
 /**
  * Get data untuk Line Chart (Balance Trend)
@@ -3563,11 +3565,16 @@ function sendPaymentNotification(userId, transactionId) {
  * Save payment submission draft
  */
 function savePaymentDraft(userId, step, dataJson) {
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(10000)) {
+    return { success: false, message: 'Sistem sedang sibuk, coba lagi.' };
+  }
   try {
     const sheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
     const rows = sheet.getDataRange().getValues();
     let existingRowIndex = -1;
     let existingDraftId = null;
+
     for (let i = rows.length - 1; i >= 1; i--) {
       if (String(rows[i][1]) === String(userId) && String(rows[i][4]) === 'draft') {
         existingRowIndex = i + 1;
@@ -3575,34 +3582,25 @@ function savePaymentDraft(userId, step, dataJson) {
         break;
       }
     }
-    
+
     const now = getCurrentDateTime();
-    
+    const serialized = typeof dataJson === 'string' ? dataJson : JSON.stringify(dataJson);
+
     if (existingRowIndex > 0) {
-      // Update existing draft
       sheet.getRange(existingRowIndex, 3).setValue(step);
-      sheet.getRange(existingRowIndex, 4).setValue(typeof dataJson === 'string' ? dataJson : JSON.stringify(dataJson));
-      
+      sheet.getRange(existingRowIndex, 4).setValue(serialized);
+      SpreadsheetApp.flush();
       return {
         success: true,
         message: 'Draft berhasil disimpan',
         data: { id: existingDraftId }
       };
     } else {
-      // Create new draft
       const draftId = generateId(CONFIG.ID_PREFIX.PAYMENT_SUBMISSION);
-      
-      const rowData = [
-        draftId,
-        userId,
-        step,
-        typeof dataJson === 'string' ? dataJson : JSON.stringify(dataJson),
-        'draft',
-        now
-      ];
-
-      insertRowWithLock(sheet, rowData);
-      
+      const rowData = [draftId, userId, step, serialized, 'draft', now];
+      const lastRow = sheet.getLastRow();
+      sheet.getRange(lastRow + 1, 1, 1, rowData.length).setValues([rowData]);
+      SpreadsheetApp.flush();
       return {
         success: true,
         message: 'Draft berhasil disimpan',
@@ -3610,12 +3608,12 @@ function savePaymentDraft(userId, step, dataJson) {
       };
     }
   } catch (error) {
-    return {
-      success: false,
-      message: `Error: ${error.message}`
-    };
+    return { success: false, message: `Error: ${error.message}` };
+  } finally {
+    lock.releaseLock();
   }
 }
+
 
 /**
  * Get payment draft
@@ -3673,6 +3671,37 @@ function getPaymentDraft(userId) {
  */
 function submitPayment(userId, paymentData) {
   try {
+    // Validasi nominal lebih awal
+    const nominal = formatNominal(paymentData.nominal);
+    if (!nominal || nominal <= 0) {
+      return {
+        success: false,
+        message: 'Nominal pembayaran harus lebih dari 0'
+      };
+    }
+
+    if (!paymentData.metode_pembayaran || !CONFIG.ENUMS.PAYMENTMETHOD.includes(paymentData.metode_pembayaran)) {
+      return {
+        success: false,
+        message: 'Metode pembayaran tidak valid'
+      };
+    }
+
+    if (!paymentData.bulan_iuran) {
+      return {
+        success: false,
+        message: 'Bulan iuran harus diisi'
+      };
+    }
+
+    // Validasi format bulan_iuran (MM-YYYY)
+    if (!/^\d{2}-\d{4}$/.test(paymentData.bulan_iuran)) {
+      return {
+        success: false,
+        message: 'Format bulan iuran tidak valid (MM-YYYY)'
+      };
+    }
+
     const iuranCategory = getCategoryById('CAT-IB');
     if (!iuranCategory || !isTruthy(iuranCategory.is_active)) {
       return {
@@ -3681,24 +3710,23 @@ function submitPayment(userId, paymentData) {
       };
     }
 
-    if (paymentData.bulan_iuran) {
-      const existingTransactions = getAllTransactions({
-        user_id: userId,
-        type: 'income',
-        source: 'IURANBULANAN'
-      }).data || [];
+    // Cek duplikat
+    const existingTransactions = getAllTransactions({
+      user_id: userId,
+      type: 'income',
+      source: 'IURANBULANAN'
+    }).data || [];
 
-      const duplicate = existingTransactions.find(t =>
-        t.bulan_iuran === paymentData.bulan_iuran &&
-        (t.status === 'pending' || t.status === 'approved')
-      );
+    const duplicate = existingTransactions.find(t =>
+      t.bulan_iuran === paymentData.bulan_iuran &&
+      (t.status === 'pending' || t.status === 'approved')
+    );
 
-      if (duplicate) {
-        return {
-          success: false,
-          message: `Pembayaran untuk bulan ${paymentData.bulan_iuran} sudah ada (status: ${duplicate.status})`
-        };
-      }
+    if (duplicate) {
+      return {
+        success: false,
+        message: `Pembayaran untuk bulan ${paymentData.bulan_iuran} sudah ada (status: ${duplicate.status})`
+      };
     }
 
     // Create transaction
@@ -3707,41 +3735,39 @@ function submitPayment(userId, paymentData) {
       type: 'income',
       source: 'IURANBULANAN',
       category_id: 'CAT-IB',
-      nominal: paymentData.nominal,
+      nominal: nominal,
       tanggal: formatDate(new Date(), 'YYYY-MM-DD'),
       bulan_iuran: paymentData.bulan_iuran,
       metode_pembayaran: paymentData.metode_pembayaran,
-      rekening_id: paymentData.rekening_id,
-      bukti_url: paymentData.bukti_url,
+      rekening_id: paymentData.rekening_id || '',
+      bukti_url: paymentData.bukti_url || '',
       status: 'pending',
-      deskripsi: paymentData.deskripsi || ''
+      deskripsi: cleanString(paymentData.deskripsi) || ''
     }, userId);
-    
+
     if (!transactionResult.success) {
       return transactionResult;
     }
-    
+
     // Update draft status
     const psSheet = getSheet(CONFIG.SHEETS.PAYMENT_SUBMISSIONS);
     const psData = psSheet.getDataRange().getValues();
     for (let i = psData.length - 1; i >= 1; i--) {
-      const rowUserId = String(psData[i][1]);
-      const rowStatus = String(psData[i][4]);
-      if (rowUserId === String(userId) && rowStatus === 'draft') {
+      if (String(psData[i][1]) === String(userId) && String(psData[i][4]) === 'draft') {
         psSheet.getRange(i + 1, 5).setValue('submitted');
         break;
       }
     }
-    
+
     // Generate WhatsApp URL
     const waResult = sendPaymentNotification(userId, transactionResult.data.id);
-    
+
     return {
       success: true,
       message: 'Pembayaran berhasil disubmit',
       data: {
         transaction_id: transactionResult.data.id,
-        whatsapp_url: waResult.data?.whatsapp_url
+        whatsapp_url: waResult.data?.whatsapp_url || null
       }
     };
   } catch (error) {
@@ -3751,6 +3777,7 @@ function submitPayment(userId, paymentData) {
     };
   }
 }
+
 
 // ============================================================================
 // SECTION 18: TESTING FUNCTIONS
@@ -4382,7 +4409,7 @@ function insertDummyData() {
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 5), 'YYYY-MM-DD'),
         bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
         metode_pembayaran: 'transfer',
-        status: 'approved'
+        status: 'pending'  // selalu pending dulu, approve via validateTransaction
       },
       {
         user_id: results.users[1]?.id,
@@ -4393,7 +4420,7 @@ function insertDummyData() {
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 10), 'YYYY-MM-DD'),
         bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
         metode_pembayaran: 'transfer',
-        status: 'approved'
+        status: 'pending'
       },
       {
         user_id: results.users[2]?.id,
@@ -4403,7 +4430,7 @@ function insertDummyData() {
         nominal: 50000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 15), 'YYYY-MM-DD'),
         metode_pembayaran: 'cash',
-        status: 'approved'
+        status: 'pending'
       }
     ];
     
@@ -4808,10 +4835,15 @@ function doPost(e) {
         result = deleteUser(data.user_id, user.id);
         break;
 
-      case 'changeUserRole':
+      case 'changeUserRole': {
         if (!adminCheck.authorized) return createJsonResponse(adminCheck);
-        result = changeUserRole(data.user_id || data.userid, data.new_role || data.newrole, user.id);
+        const targetId = cleanString(data.user_id || data.userid || '');
+        const newRole = cleanString(data.new_role || data.newrole || data.role || '');
+        if (!targetId) return createJsonResponse({ success: false, message: 'user_id wajib diisi' });
+        if (!newRole) return createJsonResponse({ success: false, message: 'new_role wajib diisi' });
+        result = changeUserRole(targetId, newRole, user.id);
         break;
+      }
         
       // Transaction management
       case 'createTransaction':
