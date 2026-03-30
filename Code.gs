@@ -75,13 +75,28 @@ const CONFIG = {
   
   // Enum Values
   ENUMS: {
-    USER_STATUS: ['pending', 'approved', 'rejected'],
-    USER_ROLES: ['admin', 'warga'],
-    TRANSACTION_TYPE: ['income', 'expense'],
-    TRANSACTION_SOURCE: ['IWK', 'donasi', 'hibah', 'lainnya'],
-    PAYMENT_METHOD: ['transfer', 'qris', 'cash'],
-    TRANSACTION_STATUS: ['pending', 'approved', 'rejected'],
-    FILE_TYPE: ['bukti', 'event', 'laporan', 'profile']
+    USERSTATUS: ['pending', 'approved', 'rejected'],
+    USERROLES: ['admin', 'warga'],
+    TRANSACTIONTYPE: ['income', 'expense'],
+    KATEGORIPEMASUKAN: [
+      'IURANBULANAN',
+      'IURANINSIDENTAL',
+      'DONASI',
+      'DENDA',
+      'SALDOAWAL',
+      'LAINLAIN'
+    ],
+    KATEGORIPENGELUARAN: [
+      'OPERASIONALRUTIN',
+      'ADMINISTRASI',
+      'INFRASTRUKTURLINGKUNGAN',
+      'SOSIALKEMANUSIAAN',
+      'KEGIATANWARGA',
+      'LAINLAIN'
+    ],
+    PAYMENTMETHOD: ['transfer', 'qris', 'cash'],
+    TRANSACTIONSTATUS: ['pending', 'approved', 'rejected'],
+    FILETYPE: ['bukti', 'event', 'laporan', 'profile']
   },
   
   // Session timeout dalam jam
@@ -252,26 +267,30 @@ function initializeDriveFolders() {
 function initializeDefaultCategories() {
   const sheet = getSheet(CONFIG.SHEETS.CATEGORIES);
   const data = sheet.getDataRange().getValues();
-  
-  if (data.length <= 1) { // Hanya header
+
+  if (data.length <= 1) {
     const categories = [
-      // Income categories
-      { id: 'CAT-IWK', name: 'Iuran Wajib Keluarga', type: 'income', is_active: true },
-      { id: 'CAT-DON', name: 'Donasi', type: 'income', is_active: true },
-      { id: 'CAT-HIB', name: 'Hibah', type: 'income', is_active: true },
-      // Expense categories
-      { id: 'CAT-SMP', name: 'Sampah', type: 'expense', is_active: true },
-      { id: 'CAT-STP', name: 'Satpam', type: 'expense', is_active: true },
-      { id: 'CAT-KBR', name: 'Kebersihan', type: 'expense', is_active: true },
-      { id: 'CAT-KGT', name: 'Kegiatan', type: 'expense', is_active: true },
-      { id: 'CAT-LIN', name: 'Lainnya', type: 'expense', is_active: true }
+      // ── Pemasukan ──────────────────────────────────────────────────────
+      { id: 'CAT-IB', name: 'Iuran Bulanan', type: 'income', source: 'IURANBULANAN', isactive: true },
+      { id: 'CAT-II', name: 'Iuran Insidental', type: 'income', source: 'IURANINSIDENTAL', isactive: true },
+      { id: 'CAT-DON', name: 'Donasi', type: 'income', source: 'DONASI', isactive: true },
+      { id: 'CAT-DND', name: 'Denda', type: 'income', source: 'DENDA', isactive: true },
+      { id: 'CAT-SA', name: 'Saldo Awal', type: 'income', source: 'SALDOAWAL', isactive: true },
+      { id: 'CAT-LIN', name: 'Lain-lain (Pemasukan)', type: 'income', source: 'LAINLAIN', isactive: true },
+      // ── Pengeluaran ────────────────────────────────────────────────────
+      { id: 'CAT-OR', name: 'Operasional Rutin', type: 'expense', source: 'OPERASIONALRUTIN', isactive: true },
+      { id: 'CAT-ADM', name: 'Administrasi', type: 'expense', source: 'ADMINISTRASI', isactive: true },
+      { id: 'CAT-INF', name: 'Infrastruktur Lingkungan', type: 'expense', source: 'INFRASTRUKTURLINGKUNGAN', isactive: true },
+      { id: 'CAT-SOS', name: 'Sosial Kemanusiaan', type: 'expense', source: 'SOSIALKEMANUSIAAN', isactive: true },
+      { id: 'CAT-KGT', name: 'Kegiatan Warga', type: 'expense', source: 'KEGIATANWARGA', isactive: true },
+      { id: 'CAT-LEX', name: 'Lain-lain (Pengeluaran)', type: 'expense', source: 'LAINLAIN', isactive: true }
     ];
-    
+
     const now = getCurrentDateTime();
     const rows = categories.map(cat => [
-      cat.id, cat.name, cat.type, cat.is_active, now
+      cat.id, cat.name, cat.type, cat.isactive, now
     ]);
-    
+
     if (rows.length > 0) {
       sheet.getRange(2, 1, rows.length, 5).setValues(rows);
     }
@@ -1350,7 +1369,7 @@ function deleteUser(userId, adminId) {
  */
 function changeUserRole(userId, newRole, adminId) {
   try {
-    if (!CONFIG.ENUMS.USER_ROLES.includes(newRole)) {
+    if (!CONFIG.ENUMS.USERROLES.includes(newRole)) {
       return {
         success: false,
         message: 'Role tidak valid'
@@ -1414,7 +1433,7 @@ function createTransaction(transactionData, createdBy) {
       transactionId,
       transactionData.user_id || createdBy,
       transactionData.type,
-      transactionData.source || 'IWK',
+      transactionData.source || 'IURANBULANAN',
       transactionData.category_id || '',
       formatNominal(transactionData.nominal),
       transactionData.tanggal || formatDate(new Date(), 'YYYY-MM-DD'),
@@ -1457,8 +1476,24 @@ function createTransaction(transactionData, createdBy) {
  */
 function validateTransactionData(data) {
   // Validasi type
-  if (!CONFIG.ENUMS.TRANSACTION_TYPE.includes(data.type)) {
+  if (!CONFIG.ENUMS.TRANSACTIONTYPE.includes(data.type)) {
     return { valid: false, message: 'Tipe transaksi tidak valid (income/expense)' };
+  }
+
+  // Validasi kategori aktif berdasarkan category_id
+  if (!data.category_id) {
+    return { valid: false, message: 'Kategori transaksi wajib diisi' };
+  }
+  const category = getCategoryById(data.category_id);
+  if (!category) {
+    return { valid: false, message: 'Kategori tidak ditemukan' };
+  }
+  const isCategoryActive = category.is_active === true || String(category.is_active).toLowerCase() === 'true';
+  if (!isCategoryActive) {
+    return { valid: false, message: 'Kategori tidak aktif' };
+  }
+  if (category.type !== data.type) {
+    return { valid: false, message: 'Kategori tidak sesuai tipe transaksi' };
   }
   
   // Validasi nominal
@@ -1475,12 +1510,12 @@ function validateTransactionData(data) {
   }
   
   // Validasi status
-  if (data.status && !CONFIG.ENUMS.TRANSACTION_STATUS.includes(data.status)) {
+  if (data.status && !CONFIG.ENUMS.TRANSACTIONSTATUS.includes(data.status)) {
     return { valid: false, message: 'Status tidak valid' };
   }
   
   // Validasi metode pembayaran
-  if (data.metode_pembayaran && !CONFIG.ENUMS.PAYMENT_METHOD.includes(data.metode_pembayaran)) {
+  if (data.metode_pembayaran && !CONFIG.ENUMS.PAYMENTMETHOD.includes(data.metode_pembayaran)) {
     return { valid: false, message: 'Metode pembayaran tidak valid' };
   }
   
@@ -1557,8 +1592,24 @@ function getAllTransactions(filters = {}) {
  * Update transaction
  */
 function validateTransactionDataForUpdate(data) {
-  if (data.type !== undefined && !CONFIG.ENUMS.TRANSACTION_TYPE.includes(data.type)) {
+  if (data.type !== undefined && !CONFIG.ENUMS.TRANSACTIONTYPE.includes(data.type)) {
     return { valid: false, message: 'Tipe transaksi tidak valid (income/expense)' };
+  }
+
+  if (data.category_id !== undefined) {
+    const category = getCategoryById(data.category_id);
+    if (!category) {
+      return { valid: false, message: 'Kategori tidak ditemukan' };
+    }
+
+    const isCategoryActive = category.is_active === true || String(category.is_active).toLowerCase() === 'true';
+    if (!isCategoryActive) {
+      return { valid: false, message: 'Kategori tidak aktif' };
+    }
+
+    if (data.type !== undefined && category.type !== data.type) {
+      return { valid: false, message: 'Kategori tidak sesuai tipe transaksi' };
+    }
   }
 
   if (data.nominal !== undefined && formatNominal(data.nominal) <= 0) {
@@ -1572,11 +1623,11 @@ function validateTransactionDataForUpdate(data) {
     }
   }
 
-  if (data.status !== undefined && !CONFIG.ENUMS.TRANSACTION_STATUS.includes(data.status)) {
+  if (data.status !== undefined && !CONFIG.ENUMS.TRANSACTIONSTATUS.includes(data.status)) {
     return { valid: false, message: 'Status tidak valid' };
   }
 
-  if (data.metode_pembayaran !== undefined && !CONFIG.ENUMS.PAYMENT_METHOD.includes(data.metode_pembayaran)) {
+  if (data.metode_pembayaran !== undefined && !CONFIG.ENUMS.PAYMENTMETHOD.includes(data.metode_pembayaran)) {
     return { valid: false, message: 'Metode pembayaran tidak valid' };
   }
 
@@ -1645,7 +1696,7 @@ function updateTransaction(transactionId, transactionData, updatedBy) {
  */
 function validateTransaction(transactionId, status, adminId, notes = '') {
   try {
-    if (!CONFIG.ENUMS.TRANSACTION_STATUS.includes(status)) {
+    if (!CONFIG.ENUMS.TRANSACTIONSTATUS.includes(status)) {
       return {
         success: false,
         message: 'Status tidak valid'
@@ -1759,7 +1810,7 @@ function createCategory(categoryData, createdBy) {
       };
     }
     
-    if (!CONFIG.ENUMS.TRANSACTION_TYPE.includes(categoryData.type)) {
+    if (!CONFIG.ENUMS.TRANSACTIONTYPE.includes(categoryData.type)) {
       return {
         success: false,
         message: 'Tipe kategori tidak valid'
@@ -3509,7 +3560,7 @@ function submitPayment(userId, paymentData) {
       const existingTransactions = getAllTransactions({
         user_id: userId,
         type: 'income',
-        source: 'IWK'
+        source: 'IURANBULANAN'
       }).data || [];
 
       const duplicate = existingTransactions.find(t =>
@@ -3529,8 +3580,8 @@ function submitPayment(userId, paymentData) {
     const transactionResult = createTransaction({
       user_id: userId,
       type: 'income',
-      source: 'IWK',
-      category_id: 'CAT-IWK',
+      source: 'IURANBULANAN',
+      category_id: 'CAT-IB',
       nominal: paymentData.nominal,
       tanggal: formatDate(new Date(), 'YYYY-MM-DD'),
       bulan_iuran: paymentData.bulan_iuran,
@@ -3765,7 +3816,8 @@ function testTransactionCRUD() {
     // Create
     const createResult = createTransaction({
       type: 'income',
-      source: 'IWK',
+      source: 'IURANBULANAN',
+      category_id: 'CAT-IB',
       nominal: 100000,
       tanggal: formatDate(new Date(), 'YYYY-MM-DD'),
       bulan_iuran: formatDate(new Date(), 'MM-YYYY'),
@@ -4199,8 +4251,8 @@ function insertDummyData() {
       {
         user_id: results.users[0]?.id,
         type: 'income',
-        source: 'IWK',
-        category_id: 'CAT-IWK',
+        source: 'IURANBULANAN',
+        category_id: 'CAT-IB',
         nominal: 100000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 5), 'YYYY-MM-DD'),
         bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
@@ -4210,8 +4262,8 @@ function insertDummyData() {
       {
         user_id: results.users[1]?.id,
         type: 'income',
-        source: 'IWK',
-        category_id: 'CAT-IWK',
+        source: 'IURANBULANAN',
+        category_id: 'CAT-IB',
         nominal: 100000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 10), 'YYYY-MM-DD'),
         bulan_iuran: formatDate(new Date(now.getFullYear(), now.getMonth(), 1), 'MM-YYYY'),
@@ -4221,7 +4273,7 @@ function insertDummyData() {
       {
         user_id: results.users[2]?.id,
         type: 'income',
-        source: 'Donasi',
+        source: 'DONASI',
         category_id: 'CAT-DON',
         nominal: 50000,
         tanggal: formatDate(new Date(now.getFullYear(), now.getMonth(), 15), 'YYYY-MM-DD'),
@@ -4832,7 +4884,7 @@ function getUnpaidMonths(userId) {
     const transactions = getAllTransactions({
       user_id: userId,
       type: 'income',
-      source: 'IWK'
+      source: 'IURANBULANAN'
     });
 
     const paidMonths = new Map();
@@ -4883,7 +4935,7 @@ function getPaymentHistory(userId, limit = 12) {
     const transactions = getAllTransactions({
       user_id: userId,
       type: 'income',
-      source: 'IWK'
+      source: 'IURANBULANAN'
     });
     
     const history = (transactions.data || [])
@@ -5051,7 +5103,7 @@ function getStatisticsSummary() {
       txData
         .filter(t => {
           const date = new Date(t.tanggal);
-          return t.type === 'income' && t.source === 'IWK' &&
+          return t.type === 'income' && t.source === 'IURANBULANAN' &&
                  date.getMonth() + 1 === currentMonth &&
                  date.getFullYear() === currentYear;
         })
@@ -5216,7 +5268,7 @@ function buildReportPayload(reportType, filters, user) {
 
     // Data warga & iuran (untuk laporan warga)
     const iuranPerWarga = {};
-    incomeTx.filter(t => t.source === 'IWK').forEach(t => {
+    incomeTx.filter(t => t.source === 'IURANBULANAN').forEach(t => {
       const nama = userMap[t.user_id] || t.user_id;
       if (!iuranPerWarga[nama]) iuranPerWarga[nama] = { total: 0, count: 0, months: [] };
       iuranPerWarga[nama].total += Number(t.nominal) || 0;
