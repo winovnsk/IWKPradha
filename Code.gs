@@ -1204,9 +1204,17 @@ function validateUserData(userData, isRegistration = false) {
     return { valid: false, message: 'Nama minimal 3 karakter' };
   }
   
-  // Validasi alamat
+  // Normalisasi alamat dengan prefix tetap "Blok B "
+  if (userData.alamat !== undefined) {
+    const cleaned = cleanString(userData.alamat);
+    const PREFIX = 'Blok B ';
+    const withoutPrefix = cleaned.replace(/^blok\s+b\s*/i, '');
+    userData.alamat = PREFIX + withoutPrefix;
+  }
+  
+  // Validasi alamat (warga cukup isi nomor rumah)
   if (!userData.alamat || cleanString(userData.alamat).length < 5) {
-    return { valid: false, message: 'Alamat minimal 5 karakter' };
+    return { valid: false, message: 'Alamat (nomor rumah) harus diisi' };
   }
   
   // Validasi no_hp
@@ -1315,8 +1323,13 @@ function updateUser(userId, userData, updatedBy) {
     if (userData.nama !== undefined && cleanString(userData.nama).length < 3) {
       return { success: false, message: 'Nama minimal 3 karakter' };
     }
-    if (userData.alamat !== undefined && cleanString(userData.alamat).length < 5) {
-      return { success: false, message: 'Alamat minimal 5 karakter' };
+    if (userData.alamat !== undefined) {
+      const PREFIX = 'Blok B ';
+      const withoutPrefix = cleanString(userData.alamat).replace(/^blok\s+b\s*/i, '');
+      userData.alamat = PREFIX + withoutPrefix;
+      if (userData.alamat.length < 5) {
+        return { success: false, message: 'Alamat (nomor rumah) harus diisi' };
+      }
     }
     if (userData.no_hp !== undefined && !isValidPhoneNumber(userData.no_hp)) {
       return { success: false, message: 'Format nomor HP tidak valid' };
