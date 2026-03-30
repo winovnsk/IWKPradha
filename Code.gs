@@ -408,10 +408,28 @@ function getCurrentDateTime() {
 }
 
 /**
+ * Normalisasi nilai boolean dari Google Sheets / input string
+ */
+function isTruthy(val) {
+  return val === true || String(val).toLowerCase() === 'true';
+}
+
+/**
+ * Parse tanggal dengan aman, mempertahankan Date object dari sheet
+ */
+function safeDate(val) {
+  if (!val) return null;
+  if (val instanceof Date) return val;
+  const parsed = new Date(val);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
  * Format tanggal untuk display
  */
 function formatDate(date, format = 'DD-MM-YYYY') {
-  const d = new Date(date);
+  const d = safeDate(date);
+  if (!d) return '';
   const day = String(d.getDate()).padStart(2, '0');
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const year = d.getFullYear();
@@ -1722,7 +1740,7 @@ function validateTransaction(transactionId, status, adminId, notes = '') {
     
     // Update monthly balance
     const tanggal = sheet.getRange(rowIndex, 7).getValue();
-    updateMonthlyBalance(tanggal);
+    if (tanggal) updateMonthlyBalance(tanggal);
     
     // Log aktivitas
     logActivity(adminId, 'VALIDATE_TRANSACTION', 'transactions', transactionId, { status, notes });
@@ -1860,7 +1878,7 @@ function getAllCategories(type = null) {
     let categories = sheetToArray(data);
     
     // Filter hanya yang aktif
-    categories = categories.filter(c => c.is_active === true);
+    categories = categories.filter(c => isTruthy(c.is_active));
     
     // Filter by type
     if (type) {
@@ -2029,7 +2047,7 @@ function getAllBankAccounts(activeOnly = true) {
     
     // Filter hanya yang aktif
     if (activeOnly) {
-      accounts = accounts.filter(a => a.is_active === true);
+      accounts = accounts.filter(a => isTruthy(a.is_active));
     }
     
     // Sort by display_order
@@ -2214,7 +2232,7 @@ function getAllEvents(filters = {}) {
     
     // Filter hanya yang aktif
     if (filters.activeOnly !== false) {
-      events = events.filter(e => e.is_active === true);
+      events = events.filter(e => isTruthy(e.is_active));
     }
     
     // Filter by date range
@@ -3272,7 +3290,7 @@ function generateColors(count) {
 function logActivity(userId, action, entity, entityId, metadata = {}) {
   try {
     const sheet = getSheet(CONFIG.SHEETS.LOGS);
-    const lock = LockService.getUserLock();
+    const lock = LockService.getScriptLock();
     if (!lock.tryLock(5000)) {
       console.warn(`logActivity: gagal lock, log dilewati untuk action=${action}`);
       return null;
@@ -3556,6 +3574,14 @@ function getPaymentDraft(userId) {
  */
 function submitPayment(userId, paymentData) {
   try {
+    const iuranCategory = getCategoryById('CAT-IB');
+    if (!iuranCategory || !isTruthy(iuranCategory.is_active)) {
+      return {
+        success: false,
+        message: 'Kategori iuran bulanan tidak tersedia. Hubungi admin.'
+      };
+    }
+
     if (paymentData.bulan_iuran) {
       const existingTransactions = getAllTransactions({
         user_id: userId,
@@ -4897,12 +4923,9 @@ function getUnpaidMonths(userId) {
     // Check last 12 months
     const unpaid = [];
     for (let i = 0; i < 12; i++) {
-      let calcMonth = currentMonth - i;
-      let calcYear = currentYear;
-      while (calcMonth <= 0) {
-        calcMonth += 12;
-        calcYear--;
-      }
+      const d = new Date(currentYear, currentMonth - 1 - i, 1);
+      const calcMonth = d.getMonth() + 1;
+      const calcYear = d.getFullYear();
       const mm = String(calcMonth).padStart(2, '0');
       const monthStr = `${mm}-${calcYear}`;
       
@@ -5186,7 +5209,7 @@ function buildReportPayload(reportType, filters, user) {
     const appName     = settings.app_name   || 'IWK RT 11';
     const alamatRt    = settings.alamat_rt  || 'Komplek Pradha';
     const generatedAt = formatDate(new Date(), 'DD-MM-YYYY HH:mm:ss');
-    const generatedBy = user ? user.nama : 'Sistem';
+    const generatedBy = user ? (user.nama || user.id) : 'Sistem';
 
     // Resolusi periode
     let periodLabel, startDate, endDate;
