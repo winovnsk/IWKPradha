@@ -469,7 +469,11 @@ function getPasswordSalt() {
 }
 
 function hashPassword(password) {
-  const salted = password + getPasswordSalt();
+  const salt = getPasswordSalt();
+  if (!salt) {
+    throw new Error('PASSWORD_SALT belum dikonfigurasi');
+  }
+  const salted = password + salt;
   const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salted);
   return bytes.map(b => ('0' + (b & 0xFF).toString(16)).slice(-2)).join('');
 }
@@ -711,6 +715,14 @@ function loginUser(identifier, password) {
         message: 'ID/Email dan password harus diisi'
       };
     }
+    const normalizedIdentifier = String(identifier).toLowerCase().trim();
+    const loginLimiter = consumeRateLimit('login', normalizedIdentifier, 5, 300);
+    if (!loginLimiter.allowed) {
+      return {
+        success: false,
+        message: `Terlalu banyak percobaan login. Coba lagi dalam ${loginLimiter.waitSeconds} detik`
+      };
+    }
     
     const sheet = getSheet(CONFIG.SHEETS.USERS);
     const data = sheet.getDataRange().getValues();
@@ -723,7 +735,7 @@ function loginUser(identifier, password) {
       const rowId = String(data[i][0]).toLowerCase(); // id
       const rowEmail = String(data[i][4]).toLowerCase(); // email
       
-      if (rowId === identifier.toLowerCase() || rowEmail === identifier.toLowerCase()) {
+      if (rowId === normalizedIdentifier || rowEmail === normalizedIdentifier) {
         user = {};
         headers.forEach((header, index) => {
           user[header] = data[i][index];
@@ -790,7 +802,7 @@ function loginUser(identifier, password) {
     const userData = { ...user };
     delete userData.password_hash;
     
-    return {
+    const response = {
       success: true,
       message: 'Login berhasil',
       data: {
@@ -798,6 +810,8 @@ function loginUser(identifier, password) {
         token: sessionToken
       }
     };
+    resetRateLimit('login', normalizedIdentifier);
+    return response;
   } catch (error) {
     return {
       success: false,
@@ -823,6 +837,7 @@ function generateSessionToken(userId) {
     created_at: getCurrentDateTime(),
     expires_at: expiryTime
   }), 'Session token');
+  clearSessionCache(token);
   
   return token;
 }
@@ -843,7 +858,11 @@ function invalidateUserSessions(userId) {
   }
 
   rowsToDelete.sort((a, b) => b - a);
-  rowsToDelete.forEach(rowIndex => sheet.deleteRow(rowIndex));
+  rowsToDelete.forEach(rowIndex => {
+    const token = String(data[rowIndex - 1][0] || '').replace('session_', '');
+    clearSessionCache(token);
+    sheet.deleteRow(rowIndex);
+  });
 }
 
 /**
@@ -852,6 +871,8 @@ function invalidateUserSessions(userId) {
 function verifySessionToken(token) {
   try {
     if (!token) return null;
+    const cachedUser = getSessionCache(token);
+    if (cachedUser) return cachedUser;
 
     const sessionKey = `session_${token}`;
     const sessionData = getSetting(sessionKey);
@@ -878,6 +899,7 @@ function verifySessionToken(token) {
       session.expires_at = newExpiry;
       setSetting(sessionKey, JSON.stringify(session), 'Session token');
     }
+    cacheSessionUser(token, user);
 
     return user;
   } catch (error) {
@@ -895,6 +917,7 @@ function deleteSessionToken(token) {
   if (rowIndex > 0) {
     sheet.deleteRow(rowIndex);
   }
+  clearSessionCache(token);
 }
 
 /**
@@ -935,6 +958,7 @@ function cleanupExpiredSessions() {
           const expiresAt = new Date(sessionData.expires_at);
           
           if (expiresAt < now) {
+            clearSessionCache(key.replace('session_', ''));
             rowsToDelete.push(i + 1); // +1 karena sheet index dimulai dari 1
           }
         } catch (e) {
@@ -967,6 +991,70 @@ function normalizeAuthToken(rawToken) {
   if (!rawToken) return '';
   const token = String(rawToken).trim();
   return token.toLowerCase().startsWith('bearer ') ? token.substring(7).trim() : token;
+}
+
+function getSessionCacheKey(token) {
+  return `session_user_${token}`;
+}
+
+function getSessionCache(token) {
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(getSessionCacheKey(token));
+  return raw ? safeJsonParse(raw) : null;
+}
+
+function cacheSessionUser(token, user) {
+  if (!token || !user) return;
+  CacheService.getScriptCache().put(getSessionCacheKey(token), JSON.stringify(user), 600); // 10 menit
+}
+
+function clearSessionCache(token) {
+  if (!token) return;
+  CacheService.getScriptCache().remove(getSessionCacheKey(token));
+}
+
+function getRateLimitKey(action, identity) {
+  const normalizedIdentity = cleanString(identity || 'anonymous').toLowerCase();
+  const digest = Utilities.base64EncodeWebSafe(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, normalizedIdentity)
+  ).substring(0, 32);
+  return `rl_${action}_${digest}`;
+}
+
+function consumeRateLimit(action, identity, maxAttempts = 5, windowSeconds = 300) {
+  const cache = CacheService.getScriptCache();
+  const key = getRateLimitKey(action, identity);
+  const now = Date.now();
+  const state = safeJsonParse(cache.get(key), { count: 0, blockedUntil: 0 });
+
+  if (state.blockedUntil && now < state.blockedUntil) {
+    const waitSeconds = Math.ceil((state.blockedUntil - now) / 1000);
+    return { allowed: false, waitSeconds };
+  }
+
+  state.count = (Number(state.count) || 0) + 1;
+  state.blockedUntil = 0;
+
+  if (state.count > maxAttempts) {
+    const extraAttempts = state.count - maxAttempts;
+    const cooldownSeconds = Math.min(3600, Math.pow(2, extraAttempts) * 30);
+    state.blockedUntil = now + (cooldownSeconds * 1000);
+    cache.put(key, JSON.stringify(state), Math.max(windowSeconds, cooldownSeconds));
+    return { allowed: false, waitSeconds: cooldownSeconds };
+  }
+
+  cache.put(key, JSON.stringify(state), windowSeconds);
+  return { allowed: true };
+}
+
+function resetRateLimit(action, identity) {
+  CacheService.getScriptCache().remove(getRateLimitKey(action, identity));
+}
+
+function sanitizeDateParam(value) {
+  if (!value) return undefined;
+  const clean = String(value).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(clean) ? clean : undefined;
 }
 
 /**
@@ -1022,6 +1110,15 @@ function requireAdmin(user) {
  */
 function registerUser(userData) {
   try {
+    const registerIdentity = userData?.email || userData?.no_hp || 'anonymous_register';
+    const registerLimiter = consumeRateLimit('register', registerIdentity, 3, 600);
+    if (!registerLimiter.allowed) {
+      return {
+        success: false,
+        message: `Terlalu banyak percobaan registrasi. Coba lagi dalam ${registerLimiter.waitSeconds} detik`
+      };
+    }
+    
     // Validasi input
     const validation = validateUserData(userData, true);
     if (!validation.valid) {
@@ -1083,11 +1180,13 @@ function registerUser(userData) {
     // Log aktivitas
     logActivity(userId, 'REGISTER', 'users', userId, { nama: userData.nama });
     
-    return {
+    const response = {
       success: true,
       message: 'Registrasi berhasil. Menunggu persetujuan admin.',
       data: { id: userId }
     };
+    resetRateLimit('register', registerIdentity);
+    return response;
   } catch (error) {
     return {
       success: false,
@@ -2432,7 +2531,7 @@ function getAllAnnouncements(limit = 10) {
     let announcements = sheetToArray(data);
     
     // Filter hanya yang aktif
-    announcements = announcements.filter(a => a.is_active === true);
+    announcements = announcements.filter(a => isTruthy(a.is_active));
     
     // Sort by tanggal descending
     announcements.sort((a, b) => new Date(b.tanggal) - new Date(a.tanggal));
@@ -4429,7 +4528,9 @@ function clearDummyData() {
     // Clear test transactions
     const transactions = getAllTransactions();
     for (const tx of transactions.data || []) {
-      if (tx.id?.includes('TRX')) {
+      const isDummyTx = String(tx.created_by || '').toUpperCase() === 'SYSTEM' ||
+        /test|dummy/i.test(String(tx.deskripsi || ''));
+      if (isDummyTx) {
         try {
           deleteTransaction(tx.id, 'SYSTEM');
           results.deleted.push(`Transaction: ${tx.id}`);
@@ -4505,12 +4606,14 @@ function doGet(e) {
           break;
         }
         const requestedUserId = cleanString(e.parameter.user_id || e.parameter.userid || '');
+        const startDate = sanitizeDateParam(e.parameter.start_date || e.parameter.startdate);
+        const endDate = sanitizeDateParam(e.parameter.end_date || e.parameter.enddate);
         const filterUserId = user.role !== 'admin' ? user.id : (requestedUserId || undefined);
         result = getAllTransactions({
           type: e.parameter.type,
           status: e.parameter.status,
-          start_date: e.parameter.start_date || e.parameter.startdate,
-          end_date: e.parameter.end_date || e.parameter.enddate,
+          start_date: startDate,
+          end_date: endDate,
           user_id: filterUserId
         });
         break;
@@ -4521,8 +4624,8 @@ function doGet(e) {
           break;
         }
         result = getFinancialReport({
-          start_date: e.parameter.start_date,
-          end_date: e.parameter.end_date
+          start_date: sanitizeDateParam(e.parameter.start_date),
+          end_date: sanitizeDateParam(e.parameter.end_date)
         });
         break;
         
