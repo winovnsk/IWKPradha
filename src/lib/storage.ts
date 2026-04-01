@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { getSupabaseServerClient } from './supabase';
 
 const BUCKET_NAME = 'uploads';
 
@@ -13,6 +13,7 @@ export interface UploadResult {
  * Upload file ke Supabase Storage
  */
 export async function uploadFile(file: File, folder: string = ''): Promise<UploadResult> {
+  const supabase = getSupabaseServerClient();
   const ext = file.name.split('.').pop() || 'bin';
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 8);
@@ -52,6 +53,7 @@ export async function uploadFile(file: File, folder: string = ''): Promise<Uploa
  */
 export async function deleteFile(url: string): Promise<void> {
   try {
+    const supabase = getSupabaseServerClient();
     const urlObj = new URL(url);
     const pathParts = urlObj.pathname.split('/uploads/');
     if (pathParts.length < 2) return;
