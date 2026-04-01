@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
     if (!user.password || user.password === '') {
       return NextResponse.json({ success: false, message: 'Akun belum memiliki password. Hubungi admin.' }, { status: 401 });
     }
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, user.password as string);
     if (!isPasswordValid) {
       return NextResponse.json({ success: false, message: 'Password salah' }, { status: 401 });
     }
