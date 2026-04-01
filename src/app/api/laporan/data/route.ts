@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     const transactions = await db.$queryRawUnsafe(
       `SELECT id, type, "categoryId", nominal, tanggal, status, deskripsi
        FROM "Transaction" 
-       WHERE status = 'approved' AND tanggal >= ?
+       WHERE status = 'approved' AND tanggal >= $1
        ORDER BY tanggal ASC`,
       minDate
     ) as Record<string, unknown>[];

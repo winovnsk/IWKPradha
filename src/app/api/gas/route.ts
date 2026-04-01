@@ -61,23 +61,15 @@ async function handleLocal(action: string, params: Record<string, unknown>) {
       const value = String(params.value);
       // Use raw query to avoid Prisma client cache issues
       // First try update, then insert if no rows affected
-      const result = await db.$queryRawUnsafe(
+      const updatedRows = await db.$executeRawUnsafe(
         `UPDATE "Setting" SET "value" = $1, "updatedAt" = NOW() WHERE "key" = $2`,
         value, key
       );
-      // @ts-expect-error PostgreSQL returns affected rows
-      if (!result || result.affectedRows === 0 || (Array.isArray(result) && result.length === 0)) {
-        // Check if row exists
-        const existing = await db.$queryRawUnsafe(
-          `SELECT id FROM "Setting" WHERE "key" = $1 LIMIT 1`,
-          key
-        ) as Record<string, unknown>[];
-        if (existing.length === 0) {
-          await db.$queryRawUnsafe(
-            `INSERT INTO "Setting" ("id", "key", "value", "description", "updatedAt") VALUES (gen_random_uuid(), $1, $2, '', NOW())`,
-            key, value
-          );
-        }
+      if (updatedRows === 0) {
+        await db.$executeRawUnsafe(
+          `INSERT INTO "Setting" ("id", "key", "value", "description", "updatedAt") VALUES (gen_random_uuid(), $1, $2, '', NOW())`,
+          key, value
+        );
       }
       return { success: true, message: 'Pengaturan berhasil diperbarui' };
     }
@@ -95,7 +87,13 @@ async function handleLocal(action: string, params: Record<string, unknown>) {
       }
 
       const userId = String(params.userId || '');
-      const nominal = Number(params.nominal) || 100000;
+      let nominal = Number(params.nominal) || 0;
+      if (nominal <= 0) {
+        const nominalSetting = await db.$queryRawUnsafe(
+          `SELECT value FROM "Setting" WHERE key = 'default_iwk_nominal' LIMIT 1`
+        ) as { value: string }[];
+        nominal = Number(nominalSetting[0]?.value || '100000') || 100000;
+      }
       const metode = String(params.metodePembayaran || 'transfer');
       const monthNames: Record<string, string> = {
         '01': 'Januari', '02': 'Februari', '03': 'Maret', '04': 'April',
