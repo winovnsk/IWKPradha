@@ -1,0 +1,71 @@
+// Prisma Schema for IWK RT 11 - Sistem Iuran Wajib Komplek
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Setting {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String   @default("")
+  updatedAt   DateTime @updatedAt
+}
+
+model Announcement {
+  id          String   @id @default(cuid())
+  title       String
+  content     String
+  tanggal     String
+  images      String   @default("")
+  attachments String   @default("")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Event {
+  id              String   @id @default(cuid())
+  title           String
+  description     String
+  tanggalMulai    String
+  tanggalSelesai  String
+  lokasi          String   @default("")
+  fotoUrl         String   @default("")
+  images          String   @default("")
+  attachments     String   @default("")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Transaction {
+  id         String   @id @default(cuid())
+  userId     String   @default("")
+  type       String
+  categoryId String   @default("")
+  nominal    Int
+  tanggal    String
+  status     String   @default("approved")
+  deskripsi  String   @default("")
+  createdAt  DateTime @default(now())
+}
+
+model User {
+  id        String   @id @default(cuid())
+  nama      String
+  alamat    String   @default("")
+  noHp      String   @default("")
+  email     String   @unique
+  password  String   @default("")
+  role      String   @default("warga")
+  status    String   @default("approved")
+  foto      String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,19 @@
+# ═══════════════════════════════════════════
+# IWK RT 11 - Template Environment Variables
+# Copy file ini menjadi .env dan isi nilainya
+# ═══════════════════════════════════════════
+
+# ── Database (Supabase PostgreSQL) ──
+# Dapatkan dari: Supabase Dashboard → Settings → Database → Connection string (URI)
+# Gunakan format URI dengan port 6543 (pooler)
+DATABASE_URL=postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
+
+# ── Supabase API ──
+# Dapatkan dari: Supabase Dashboard → Settings → API
+NEXT_PUBLIC_SUPABASE_URL=https://[PROJECT-REF].supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=[ANON-KEY-ANDA]
+SUPABASE_SERVICE_ROLE_KEY=[SERVICE-ROLE-KEY-ANDA]
+
+# ── Google Apps Script (opsional) ──
+# Kosongkan jika tidak menggunakan GAS backend
+# GAS_URL=https://script.google.com/macros/s/[SCRIPT-ID]/exec
