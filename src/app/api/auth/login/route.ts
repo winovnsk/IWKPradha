@@ -3,12 +3,24 @@ import { db } from '@/lib/db';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 
+type LoginUserRow = {
+  id: string;
+  nama: string;
+  alamat: string | null;
+  noHp: string | null;
+  email: string;
+  password: string | null;
+  role: string;
+  status: string;
+  foto: string | null;
+};
+
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body = await request.json() as { identifier?: string; password?: string };
     const { identifier, password } = body;
 
-    if (!identifier || !password) {
+    if (typeof identifier !== 'string' || typeof password !== 'string' || !identifier || !password) {
       return NextResponse.json({ success: false, message: 'Email dan password harus diisi' }, { status: 400 });
     }
 
@@ -20,7 +32,7 @@ export async function POST(request: NextRequest) {
       `SELECT * FROM "User" WHERE (LOWER("email") = $1 OR REPLACE(REPLACE("noHp", ' ', ''), '-', '') = $2) LIMIT 1`,
       identifierLower,
       identifierClean
-    ) as Record<string, unknown>[];
+    ) as LoginUserRow[];
 
     const user = users[0];
 
@@ -43,7 +55,7 @@ export async function POST(request: NextRequest) {
     if (!user.password || user.password === '') {
       return NextResponse.json({ success: false, message: 'Akun belum memiliki password. Hubungi admin.' }, { status: 401 });
     }
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, user.password as string);
     if (!isPasswordValid) {
       return NextResponse.json({ success: false, message: 'Password salah' }, { status: 401 });
     }
