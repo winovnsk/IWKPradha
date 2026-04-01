@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { randomUUID } from 'crypto';
 
 function safeJsonParse(str: string): unknown {
   if (!str) return [];
@@ -53,7 +54,7 @@ export async function POST(request: NextRequest) {
     await db.$queryRawUnsafe(
       `INSERT INTO "Announcement" (id, title, content, tanggal, images, attachments, "isActive", "createdAt", "updatedAt")
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
-      crypto.randomUUID(),
+      randomUUID(),
       title,
       content || '',
       tanggal,

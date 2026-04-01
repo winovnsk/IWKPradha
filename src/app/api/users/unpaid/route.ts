@@ -31,6 +31,11 @@ export async function GET(request: NextRequest) {
       transactions.map((t) => t.tanggal.substring(0, 7))
     );
 
+    const nominalSetting = await db.$queryRawUnsafe(
+      `SELECT value FROM "Setting" WHERE key = 'default_iwk_nominal' LIMIT 1`
+    ) as { value: string }[];
+    const nominal = parseInt(nominalSetting[0]?.value || '100000', 10) || 100000;
+
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
 
@@ -38,7 +43,7 @@ export async function GET(request: NextRequest) {
     for (let m = 1; m <= currentMonth; m++) {
       const key = `${currentYear}-${String(m).padStart(2, '0')}`;
       if (!paidMonths.has(key)) {
-        unpaidMonths.push({ month: key, label: formatMonth(m, currentYear), nominal: 100000 });
+        unpaidMonths.push({ month: key, label: formatMonth(m, currentYear), nominal });
       }
     }
 
